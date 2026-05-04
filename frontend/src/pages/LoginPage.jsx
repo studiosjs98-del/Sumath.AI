@@ -64,7 +64,7 @@ export default function LoginPage() {
 
         {/* Google Login */}
         <a
-          href="http://localhost:3001/auth/google"
+          href={`${import.meta.env.VITE_API_URL}/auth/google`}
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
             width: '100%', padding: '11px 14px', marginBottom: 16,
@@ -161,14 +161,6 @@ export default function LoginPage() {
             {loading ? '처리 중...' : mode === 'login' ? '로그인' : '회원가입'}
           </button>
         </form>
-
-        <div style={{
-          marginTop: 20, padding: '10px 14px',
-          background: 'var(--primary-light)', borderRadius: 8,
-          fontSize: 12, color: 'var(--primary)', textAlign: 'center'
-        }}>
-          💡 데모 계정: <strong>demo</strong> / <strong>demo123</strong>
-        </div>
       </div>
     </div>
   )
