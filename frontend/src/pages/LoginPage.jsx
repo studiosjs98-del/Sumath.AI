@@ -64,7 +64,7 @@ export default function LoginPage() {
 
         {/* Google Login */}
         <a
-          href={`${import.meta.env.VITE_API_URL}/auth/google`}
+          href={`${import.meta.env.VITE_API_URL || ''}/auth/google`}
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
             width: '100%', padding: '11px 14px', marginBottom: 16,
