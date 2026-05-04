@@ -5,6 +5,8 @@ import SumathLogo from '../components/SumathLogo'
 
 const GRADES = ['중1', '중2', '중3', '고1', '고2', '고3']
 
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+
 export default function LoginPage() {
   const navigate = useNavigate()
   const { login, register, loading, error } = useStore()
@@ -64,7 +66,7 @@ export default function LoginPage() {
 
         {/* Google Login */}
         <a
-          href={`${import.meta.env.VITE_API_URL || ''}/auth/google`}
+          href={`${API_BASE}/auth/google`}
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
             width: '100%', padding: '11px 14px', marginBottom: 16,
