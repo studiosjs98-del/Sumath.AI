@@ -66,7 +66,7 @@ export default function LoginPage() {
 
         {/* Google Login — window.location.href bypasses React Router entirely */}
         <button
-          onClick={() => { window.location.href = '/auth/google' }}
+          onClick={() => { window.location.href = 'https://sumath-ai.onrender.com/auth/google' }}
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
             width: '100%', padding: '11px 14px', marginBottom: 16,
