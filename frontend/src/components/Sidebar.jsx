@@ -29,9 +29,9 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onMob
     localStorage.setItem('sidebarHistoryOpen', String(next))
   }
 
-  const handleNewChat = () => { setActiveChatId(null); navigate('/'); onMobileClose?.() }
-  const handleSelectChat = (id) => { setActiveChatId(id); navigate('/'); onMobileClose?.() }
-  const handleSearchSelect = (id) => { setActiveChatId(id); setSearchOpen(false); setSearchQuery(''); navigate('/'); onMobileClose?.() }
+  const handleNewChat = () => { setActiveChatId(null); navigate('/chat'); onMobileClose?.() }
+  const handleSelectChat = (id) => { setActiveChatId(id); navigate('/chat'); onMobileClose?.() }
+  const handleSearchSelect = (id) => { setActiveChatId(id); setSearchOpen(false); setSearchQuery(''); navigate('/chat'); onMobileClose?.() }
 
   const handleDeleteChat = (e, id) => {
     e.stopPropagation()
@@ -51,7 +51,7 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onMob
 
   const handleLogout = () => {
     logout()
-    navigate('/')
+    navigate('/chat')
   }
 
   const gradeDisplay = student?.grade_level && student.grade_level !== 'unknown'

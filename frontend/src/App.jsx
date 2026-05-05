@@ -9,6 +9,7 @@ import Footer from './components/Footer'
 import Toast from './components/Toast'
 import SumathLogo from './components/SumathLogo'
 import LoginPage from './pages/LoginPage'
+import LandingPage from './pages/LandingPage'
 import AiChatPage from './pages/AiChatPage'
 import { useHintMode } from './hooks/useHintMode'
 import OnboardingFlow from './components/OnboardingFlow'
@@ -152,12 +153,19 @@ export default function App() {
             {/* Login page — optional, not required */}
             <Route path="/login" element={<PublicLayout><LoginPage /></PublicLayout>} />
 
-            {/* Main chat — accessible to everyone, no auth required */}
+            {/* "/" — landing for guests, chat for authenticated users */}
             <Route path="/" element={
+              isAuthenticated
+                ? <AuthLayout showFooter={false} fullHeight><AiChatPage /></AuthLayout>
+                : <PublicLayout><LandingPage /></PublicLayout>
+            } />
+
+            {/* "/chat" — chat page, always accessible without login */}
+            <Route path="/chat" element={
               <AuthLayout showFooter={false} fullHeight><AiChatPage /></AuthLayout>
             } />
 
-            {/* Catch-all to chat */}
+            {/* Catch-all */}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>

@@ -84,7 +84,7 @@ export default function LandingPage() {
     const msg = (text ?? input).trim()
     if (!msg) return
     sessionStorage.setItem('pendingChatMessage', msg)
-    navigate('/')
+    navigate('/chat')
   }
 
   const handleKeyDown = (e) => {
@@ -280,7 +280,7 @@ export default function LandingPage() {
         padding:'22px 40px', gap: 8,
       }}>
         <Link to="/login" className="l-nav-link l-nav-ghost">로그인</Link>
-        <Link to="/login?register=1" className="l-nav-link l-nav-solid">무료 시작</Link>
+        <Link to="/chat" className="l-nav-link l-nav-solid">무료 시작</Link>
       </header>
 
       {/* ── Main centred content ─────────────────────────────── */}
