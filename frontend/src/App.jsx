@@ -3,27 +3,18 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Menu } from 'lucide-react'
 import useStore from './store/useStore'
 import api from './utils/api'
+import { getChats } from './utils/localChats'
 import Sidebar from './components/Sidebar'
 import Footer from './components/Footer'
 import Toast from './components/Toast'
 import SumathLogo from './components/SumathLogo'
-import LandingPage from './pages/LandingPage'
 import LoginPage from './pages/LoginPage'
 import AiChatPage from './pages/AiChatPage'
 import { useHintMode } from './hooks/useHintMode'
-import HintModePopup from './components/HintModePopup'
-import HintModeToggle from './components/HintModeToggle'
 import OnboardingFlow from './components/OnboardingFlow'
 
 export const ChatContext = createContext(null)
 
-function PrivateRoute({ children }) {
-  const { isAuthenticated } = useStore()
-  if (!isAuthenticated) return <Navigate to="/login" replace />
-  return children
-}
-
-// Layout with sidebar for authenticated pages
 function AuthLayout({ children, showFooter = true, fullHeight = false }) {
   const [collapsed, setCollapsed] = useState(() =>
     localStorage.getItem('sidebarCollapsed') === 'true'
@@ -33,15 +24,10 @@ function AuthLayout({ children, showFooter = true, fullHeight = false }) {
   const [chats, setChats] = useState([])
   const [activeChatId, setActiveChatId] = useState(null)
 
-  const { isAuthenticated } = useStore()
-
-  // Load chat list whenever user is authenticated
+  // Load chat history from localStorage on mount — works for all users
   useEffect(() => {
-    if (!isAuthenticated) return
-    api.get('/chat-histories')
-      .then(r => setChats(Array.isArray(r.data) ? r.data : []))
-      .catch(err => console.error('[chats] load failed:', err?.response?.status, err?.message))
-  }, [isAuthenticated])
+    setChats(getChats())
+  }, [])
 
   const sidebarW = collapsed ? 0 : 240
 
@@ -94,7 +80,6 @@ function AuthLayout({ children, showFooter = true, fullHeight = false }) {
   )
 }
 
-// Minimal layout for public pages (no sidebar)
 function PublicLayout({ children }) {
   return (
     <>
@@ -111,11 +96,9 @@ export default function App() {
   )
 
   useEffect(() => {
-    // Handle OAuth token from URL query param
     const params = new URLSearchParams(window.location.search)
     const urlToken = params.get('token')
     if (urlToken) {
-      // Fetch student info then log in
       api.defaults.headers.common['Authorization'] = `Bearer ${urlToken}`
       api.get('/auth/me').then(res => {
         loginWithToken(urlToken, res.data.student)
@@ -144,19 +127,16 @@ export default function App() {
 
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <Routes>
-            {/* Public — no sidebar */}
-            <Route path="/" element={<PublicLayout><LandingPage /></PublicLayout>} />
+            {/* Login page — optional, not required */}
             <Route path="/login" element={<PublicLayout><LoginPage /></PublicLayout>} />
 
-            {/* Private — sidebar layout */}
-            <Route path="/ai-chat" element={
-              <PrivateRoute>
-                <AuthLayout showFooter={false} fullHeight><AiChatPage /></AuthLayout>
-              </PrivateRoute>
+            {/* Main chat — accessible to everyone, no auth required */}
+            <Route path="/" element={
+              <AuthLayout showFooter={false} fullHeight><AiChatPage /></AuthLayout>
             } />
 
-            {/* Catch-all: authenticated users go to chat, others to landing */}
-            <Route path="*" element={<Navigate to="/ai-chat" replace />} />
+            {/* Catch-all to chat */}
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>
       </div>

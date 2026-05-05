@@ -18,7 +18,7 @@ export default function LoginPage() {
     const ok = mode === 'login'
       ? await login(form.username, form.password)
       : await register(form)
-    if (ok) navigate('/ai-chat')
+    if (ok) navigate('/')
   }
 
   const inp = {

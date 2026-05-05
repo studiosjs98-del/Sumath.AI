@@ -13,6 +13,7 @@ import KoreanCalculator from '../components/KoreanCalculator'
 import InlinePractice from '../components/InlinePractice'
 import { renderInline, stripDanglingMarkdown, Inline } from '../utils/katex'
 import katex from 'katex'
+import { getChat, saveChat, newChatId } from '../utils/localChats'
 
 const GREY = '#6B7280'
 const MAX_SEND = 30        // messages to send to AI
@@ -1101,15 +1102,21 @@ export default function AiChatPage() {
       } else {
         setMessages([])
       }
+    } else if (String(activeChatId).startsWith('local_')) {
+      const chat = getChat(activeChatId)
+      const hydrated = (chat?.messages || []).map(msg => {
+        if (msg.imageBase64 && !msg.imagePreview) {
+          return { ...msg, imagePreview: `data:${msg.imageMimeType || 'image/jpeg'};base64,${msg.imageBase64}` }
+        }
+        return msg
+      })
+      setMessages(hydrated)
     } else {
       api.get(`/chat-histories/${activeChatId}`)
         .then(r => {
           const hydrated = (r.data.messages || []).map(msg => {
             if (msg.imageBase64 && !msg.imagePreview) {
-              return {
-                ...msg,
-                imagePreview: `data:${msg.imageMimeType || 'image/jpeg'};base64,${msg.imageBase64}`
-              }
+              return { ...msg, imagePreview: `data:${msg.imageMimeType || 'image/jpeg'};base64,${msg.imageBase64}` }
             }
             return msg
           })
@@ -1532,26 +1539,24 @@ export default function AiChatPage() {
             if (titleRes.data?.title) title = titleRes.data.title
           } catch {}
 
-          api.post('/chat-histories', { title, messages: toSave })
-            .then(r => {
-              const newId = r.data.id
-              setActiveChatId(newId)
-              setChats(prev => [{ id: newId, title, updated_at: new Date().toISOString() }, ...prev])
-            })
-            .catch(err => {
-              console.error('[save] POST /chat-histories failed:', err?.response?.status, err?.message)
-              addToast('대화 저장에 실패했어요. 다시 로그인해보세요.', 'error')
-            })
+          const localId = newChatId()
+          saveChat(localId, title, toSave)
+          setActiveChatId(localId)
+          setChats(prev => [{ id: localId, title, updated_at: new Date().toISOString() }, ...prev])
+          // Best-effort server backup for logged-in users
+          if (student) {
+            api.post('/chat-histories', { title, messages: toSave }).catch(() => {})
+          }
         } else {
-          api.put(`/chat-histories/${activeChatId}`, { messages: toSave })
-            .then(() => {
-              setChats(prev => prev.map(c =>
-                c.id === activeChatId ? { ...c, updated_at: new Date().toISOString() } : c
-              ))
-            })
-            .catch(err => {
-              console.error('[save] PUT /chat-histories failed:', err?.response?.status, err?.message)
-            })
+          const existing = getChat(activeChatId)
+          saveChat(activeChatId, existing?.title || '수학 문제', toSave)
+          setChats(prev => prev.map(c =>
+            c.id === activeChatId ? { ...c, updated_at: new Date().toISOString() } : c
+          ))
+          // Update server for logged-in users with server-side IDs
+          if (student && !String(activeChatId).startsWith('local_')) {
+            api.put(`/chat-histories/${activeChatId}`, { messages: toSave }).catch(() => {})
+          }
         }
       }
 

@@ -1,9 +1,10 @@
 import React, { useContext, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { MessageSquare, Trash2, PanelLeftClose, ChevronDown, Search, BookOpen, X } from 'lucide-react'
+import { MessageSquare, Trash2, PanelLeftClose, ChevronDown, Search, BookOpen, X, LogOut, LogIn } from 'lucide-react'
 import useStore from '../store/useStore'
 import { ChatContext } from '../App'
 import api from '../utils/api'
+import { deleteChat as deleteLocalChat, clearChats } from '../utils/localChats'
 
 function SigmaIcon() {
   return (
@@ -11,11 +12,9 @@ function SigmaIcon() {
   )
 }
 
-
-
 export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onMobileClose }) {
   const navigate = useNavigate()
-  const { student, isAuthenticated } = useStore()
+  const { student, isAuthenticated, logout } = useStore()
   const { activeChatId, setActiveChatId, chats, setChats } = useContext(ChatContext)
 
   const [historyOpen, setHistoryOpen] = useState(
@@ -23,20 +22,36 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onMob
   )
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+
   const toggleHistory = () => {
     const next = !historyOpen
     setHistoryOpen(next)
     localStorage.setItem('sidebarHistoryOpen', String(next))
   }
 
-  const handleNewChat = () => { setActiveChatId(null); navigate('/ai-chat'); onMobileClose?.() }
-  const handleSelectChat = (id) => { setActiveChatId(id); navigate('/ai-chat'); onMobileClose?.() }
-  const handleSearchSelect = (id) => { setActiveChatId(id); setSearchOpen(false); setSearchQuery(''); navigate('/ai-chat'); onMobileClose?.() }
+  const handleNewChat = () => { setActiveChatId(null); navigate('/'); onMobileClose?.() }
+  const handleSelectChat = (id) => { setActiveChatId(id); navigate('/'); onMobileClose?.() }
+  const handleSearchSelect = (id) => { setActiveChatId(id); setSearchOpen(false); setSearchQuery(''); navigate('/'); onMobileClose?.() }
+
   const handleDeleteChat = (e, id) => {
     e.stopPropagation()
-    api.delete(`/chat-histories/${id}`).catch(() => {})
+    deleteLocalChat(id)
+    if (isAuthenticated && !String(id).startsWith('local_')) {
+      api.delete(`/chat-histories/${id}`).catch(() => {})
+    }
     setChats(prev => prev.filter(c => c.id !== id))
     if (activeChatId === id) setActiveChatId(null)
+  }
+
+  const handleClearHistory = () => {
+    clearChats()
+    setChats([])
+    setActiveChatId(null)
+  }
+
+  const handleLogout = () => {
+    logout()
+    navigate('/')
   }
 
   const gradeDisplay = student?.grade_level && student.grade_level !== 'unknown'
@@ -50,7 +65,7 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onMob
 
       <aside className={`sidebar${collapsed ? ' sidebar-collapsed' : ''}${mobileOpen ? ' sidebar-mobile-open' : ''}`}>
 
-        {/* ── 1. Header: logo + toggle ── */}
+        {/* ── Header: logo + toggle ── */}
         <div className="sb-header">
           <div className="sb-logo-btn" onClick={handleNewChat} title="새 대화">
             <SigmaIcon />
@@ -62,7 +77,7 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onMob
 
         <div className="sb-divider" />
 
-        {/* ── 3. Nav buttons ── */}
+        {/* ── Nav buttons ── */}
         <div className="sb-section">
           <button onClick={handleNewChat} className="sb-new-chat">
             <BookOpen size={15} strokeWidth={1.75} />
@@ -76,7 +91,7 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onMob
 
         <div className="sb-divider" />
 
-        {/* ── 4. Chat history ── */}
+        {/* ── Chat history ── */}
         <div className="sb-section sb-history">
           <div className="sb-section-label sb-history-toggle" onClick={toggleHistory}>
             <span>최근 대화</span>
@@ -90,73 +105,95 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onMob
             {chats.length === 0 ? (
               <div className="sb-empty">아직 대화가 없어요</div>
             ) : (
-              chats.map(chat => (
-                <div
-                  key={chat.id}
-                  className={`sb-chat-item${activeChatId === chat.id ? ' sb-chat-item-active' : ''}`}
-                  onClick={() => handleSelectChat(chat.id)}
-                  title={chat.title}
+              <>
+                {chats.map(chat => (
+                  <div
+                    key={chat.id}
+                    className={`sb-chat-item${activeChatId === chat.id ? ' sb-chat-item-active' : ''}`}
+                    onClick={() => handleSelectChat(chat.id)}
+                    title={chat.title}
+                  >
+                    <MessageSquare size={13} strokeWidth={1.75} style={{ flexShrink: 0, opacity: 0.5 }} />
+                    <span className="sb-chat-title">{chat.title}</span>
+                    <button className="sb-chat-delete" onClick={e => handleDeleteChat(e, chat.id)} title="삭제">
+                      <Trash2 size={13} strokeWidth={1.75} />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  onClick={handleClearHistory}
+                  style={{
+                    width: '100%', marginTop: 6, padding: '6px 12px',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    fontSize: 11, color: 'var(--text-muted)', textAlign: 'left',
+                    borderRadius: 6, transition: 'background 0.15s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.04)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'none'}
                 >
-                  <MessageSquare size={13} strokeWidth={1.75} style={{ flexShrink: 0, opacity: 0.5 }} />
-                  <span className="sb-chat-title">{chat.title}</span>
-                  <button className="sb-chat-delete" onClick={e => handleDeleteChat(e, chat.id)} title="삭제">
-                    <Trash2 size={13} strokeWidth={1.75} />
-                  </button>
-                </div>
-              ))
+                  전체 삭제
+                </button>
+              </>
             )}
           </div>
         </div>
 
-        {/* ── 5. Bottom: profile (settings trigger) ── */}
+        {/* ── Bottom: auth ── */}
         <div className="sb-bottom">
           <div className="sb-divider" style={{ margin: '0 0 8px' }} />
 
-          {isAuthenticated && student && (
-            <div
-              style={{
-                display: 'flex', alignItems: 'center', gap: 10,
-                padding: '10px 12px', borderRadius: 'var(--radius-lg)',
-                cursor: 'pointer',
-                transition: 'background 0.18s',
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = 'rgba(37,99,235,0.07)'}
-              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-            >
-              {/* Gradient avatar */}
-              <div style={{
-                width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
-                background: 'linear-gradient(135deg, #2563EB 0%, #7C3AED 100%)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: '#fff', fontWeight: 800, fontSize: 15,
-                boxShadow: '0 2px 8px rgba(37,99,235,0.3)',
-                userSelect: 'none',
-              }}>
-                {student.display_name?.[0]?.toUpperCase() || '?'}
-              </div>
-
-              {/* Name + grade */}
-              <div style={{ flex: 1, minWidth: 0 }}>
+          {isAuthenticated && student ? (
+            <div style={{ padding: '4px 12px 8px' }}>
+              {/* Profile row */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
                 <div style={{
-                  fontSize: 13, fontWeight: 700,
-                  color: 'var(--text-primary)',
-                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                  width: 32, height: 32, borderRadius: '50%', flexShrink: 0,
+                  background: 'linear-gradient(135deg, #2563EB 0%, #7C3AED 100%)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: '#fff', fontWeight: 800, fontSize: 13,
+                  userSelect: 'none',
                 }}>
-                  {student.display_name}
+                  {student.display_name?.[0]?.toUpperCase() || '?'}
                 </div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>
-                  {gradeDisplay}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {student.display_name}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{gradeDisplay}</div>
                 </div>
               </div>
-
-              {/* Settings cog hint */}
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                stroke="var(--text-muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                style={{ flexShrink: 0, opacity: 0.6 }}
+              {/* Logout button */}
+              <button
+                onClick={handleLogout}
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '7px 10px', borderRadius: 8, border: 'none',
+                  background: 'none', cursor: 'pointer', fontSize: 13,
+                  color: 'var(--text-muted)', transition: 'background 0.15s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
               >
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-              </svg>
+                <LogOut size={14} strokeWidth={1.75} />
+                로그아웃
+              </button>
+            </div>
+          ) : (
+            <div style={{ padding: '4px 12px 8px' }}>
+              <button
+                onClick={() => navigate('/login')}
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  padding: '9px 10px', borderRadius: 8, border: '1.5px solid var(--border)',
+                  background: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                  color: 'var(--primary)', transition: 'background 0.15s, border-color 0.15s',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'var(--primary-light)'; e.currentTarget.style.borderColor = 'var(--primary)' }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.borderColor = 'var(--border)' }}
+              >
+                <LogIn size={14} strokeWidth={1.75} />
+                로그인
+              </button>
             </div>
           )}
         </div>
