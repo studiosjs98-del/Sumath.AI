@@ -100,27 +100,30 @@ export default function App() {
     const params = new URLSearchParams(window.location.search)
     const urlToken = params.get('token')
     if (urlToken) {
-      // Strip token from URL immediately — before any async work
       window.history.replaceState({}, '', window.location.pathname)
       api.defaults.headers.common['Authorization'] = `Bearer ${urlToken}`
 
+      // Write auth state directly to localStorage in Zustand's persist format.
+      // This is synchronous and guaranteed to land before window.location.replace fires.
+      const persistAuth = (token, student) => {
+        const data = { state: { token, student, isAuthenticated: true }, version: 0 }
+        localStorage.setItem('sumath-store', JSON.stringify(data))
+      }
+
       api.get('/auth/me')
         .then(res => {
-          loginWithToken(urlToken, res.data.student)
-          // Persist is synchronous — reload to render fully authenticated state
+          persistAuth(urlToken, res.data.student)
           window.location.replace('/')
         })
         .catch(() => {
-          // /auth/me failed (CORS, cold start, network) — decode JWT locally
-          // and log in with minimal data so the user isn't silently dropped
           try {
-            const payload = JSON.parse(atob(urlToken.split('.')[1]))
+            // JWT uses base64url — replace chars before atob, then pad to multiple of 4
+            const b64 = urlToken.split('.')[1]
+              .replace(/-/g, '+').replace(/_/g, '/')
+            const padded = b64 + '='.repeat((4 - b64.length % 4) % 4)
+            const payload = JSON.parse(atob(padded))
             if (payload?.studentId) {
-              loginWithToken(urlToken, {
-                id: payload.studentId,
-                display_name: '',
-                grade_level: '',
-              })
+              persistAuth(urlToken, { id: payload.studentId, display_name: '', grade_level: '' })
               window.location.replace('/')
             } else {
               delete api.defaults.headers.common['Authorization']
