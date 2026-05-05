@@ -106,6 +106,8 @@ export default function App() {
       api.get('/auth/me')
         .then(res => {
           loginWithToken(urlToken, res.data.student)
+          // Persist is synchronous — reload to render fully authenticated state
+          window.location.replace('/')
         })
         .catch(() => {
           // /auth/me failed (CORS, cold start, network) — decode JWT locally
@@ -118,6 +120,7 @@ export default function App() {
                 display_name: '',
                 grade_level: '',
               })
+              window.location.replace('/')
             } else {
               delete api.defaults.headers.common['Authorization']
             }
