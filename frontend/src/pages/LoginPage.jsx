@@ -66,7 +66,7 @@ export default function LoginPage() {
 
         {/* Google Login */}
         <a
-          href={`${API_BASE}/auth/google`}
+          href="/auth/google"
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
             width: '100%', padding: '11px 14px', marginBottom: 16,
