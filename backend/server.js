@@ -17,9 +17,9 @@ const analysisRoutes = require('./routes/analysis');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'sumath_secret_key';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 
-app.use(cors({ origin: FRONTEND_URL, credentials: true }));
+app.use(cors({ origin: CLIENT_URL, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 app.use(session({ secret: process.env.SESSION_SECRET || 'sumath_session_secret', resave: false, saveUninitialized: false }));
@@ -34,7 +34,7 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   passport.use(new GoogleStrategy({
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: `${process.env.BACKEND_URL || `http://localhost:${PORT}`}/auth/google/callback`
+    callbackURL: `${process.env.SERVER_URL || `http://localhost:${PORT}`}/auth/google/callback`
   }, (accessToken, refreshToken, profile, done) => {
     const googleId = profile.id;
     const displayName = profile.displayName || profile.emails?.[0]?.value?.split('@')[0] || 'Student';
@@ -64,11 +64,11 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
 
   app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
   app.get('/auth/google/callback',
-    passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login` }),
+    passport.authenticate('google', { failureRedirect: `${CLIENT_URL}/login` }),
     (req, res) => {
       const student = req.user;
       const token = jwt.sign({ studentId: student.id }, JWT_SECRET, { expiresIn: '7d' });
-      res.redirect(`${FRONTEND_URL}/?token=${token}`);
+      res.redirect(`${CLIENT_URL}/?token=${token}`);
     }
   );
 } else {
