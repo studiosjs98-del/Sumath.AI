@@ -84,7 +84,7 @@ export default function LandingPage() {
     const msg = (text ?? input).trim()
     if (!msg) return
     sessionStorage.setItem('pendingChatMessage', msg)
-    navigate('/ai-chat')
+    navigate('/')
   }
 
   const handleKeyDown = (e) => {

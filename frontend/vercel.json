@@ -1,8 +1,18 @@
 {
+  "redirects": [
+    {
+      "source": "/auth/google",
+      "destination": "https://sumath-ai.onrender.com/auth/google",
+      "permanent": false
+    },
+    {
+      "source": "/auth/google/callback",
+      "destination": "https://sumath-ai.onrender.com/auth/google/callback",
+      "permanent": false
+    }
+  ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "https://sumath-ai.onrender.com/api/$1" },
-    { "source": "/auth/google", "destination": "https://sumath-ai.onrender.com/auth/google" },
-    { "source": "/auth/google/callback", "destination": "https://sumath-ai.onrender.com/auth/google/callback" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
