@@ -64,17 +64,18 @@ export default function LoginPage() {
           ))}
         </div>
 
-        {/* Google Login */}
-        <a
-          href="/auth/google"
+        {/* Google Login — window.location.href bypasses React Router entirely */}
+        <button
+          onClick={() => { window.location.href = '/auth/google' }}
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
             width: '100%', padding: '11px 14px', marginBottom: 16,
             background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8,
             fontSize: 14, fontWeight: 600, color: '#374151',
-            textDecoration: 'none', cursor: 'pointer',
+            cursor: 'pointer',
             boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-            transition: 'box-shadow 0.2s'
+            transition: 'box-shadow 0.2s',
+            fontFamily: 'inherit',
           }}
           onMouseEnter={e => e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.12)'}
           onMouseLeave={e => e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.08)'}
@@ -86,7 +87,7 @@ export default function LoginPage() {
             <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
           </svg>
           Google로 로그인
-        </a>
+        </button>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
           <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
