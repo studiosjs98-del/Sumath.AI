@@ -99,13 +99,32 @@ export default function App() {
     const params = new URLSearchParams(window.location.search)
     const urlToken = params.get('token')
     if (urlToken) {
+      // Strip token from URL immediately — before any async work
+      window.history.replaceState({}, '', window.location.pathname)
       api.defaults.headers.common['Authorization'] = `Bearer ${urlToken}`
-      api.get('/auth/me').then(res => {
-        loginWithToken(urlToken, res.data.student)
-        window.history.replaceState({}, '', window.location.pathname)
-      }).catch(() => {
-        delete api.defaults.headers.common['Authorization']
-      })
+
+      api.get('/auth/me')
+        .then(res => {
+          loginWithToken(urlToken, res.data.student)
+        })
+        .catch(() => {
+          // /auth/me failed (CORS, cold start, network) — decode JWT locally
+          // and log in with minimal data so the user isn't silently dropped
+          try {
+            const payload = JSON.parse(atob(urlToken.split('.')[1]))
+            if (payload?.studentId) {
+              loginWithToken(urlToken, {
+                id: payload.studentId,
+                display_name: '',
+                grade_level: '',
+              })
+            } else {
+              delete api.defaults.headers.common['Authorization']
+            }
+          } catch {
+            delete api.defaults.headers.common['Authorization']
+          }
+        })
     } else if (token) {
       api.defaults.headers.common['Authorization'] = `Bearer ${token}`
     }
