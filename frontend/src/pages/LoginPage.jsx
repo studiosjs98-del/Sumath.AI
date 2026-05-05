@@ -5,7 +5,7 @@ import SumathLogo from '../components/SumathLogo'
 
 const GRADES = ['중1', '중2', '중3', '고1', '고2', '고3']
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+const API_BASE = import.meta.env.VITE_API_URL || ''
 
 export default function LoginPage() {
   const navigate = useNavigate()
