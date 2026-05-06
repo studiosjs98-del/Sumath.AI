@@ -259,7 +259,7 @@ export function PracticePanel({ questions, loading, onClose, onWrongAnswer }) {
   const isCorrectAnswer = isRevealing && selected === q?.correct_index
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: '#f5f5f5' }}>
 
       {/* ── Progress header ──────────────────────────────────────────────────── */}
       <div style={{ padding: '16px 20px 14px', borderBottom: '1px solid #F1F5FF', background: '#FAFBFF', flexShrink: 0 }}>
