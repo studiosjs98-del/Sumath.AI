@@ -1902,6 +1902,7 @@ export default function AiChatPage() {
           display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center',
           padding: '0 24px 32px', boxSizing: 'border-box',
+          background: '#ffffff',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 10 }}>
             <SigmaLogo />

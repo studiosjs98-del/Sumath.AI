@@ -259,10 +259,10 @@ export function PracticePanel({ questions, loading, onClose, onWrongAnswer }) {
   const isCorrectAnswer = isRevealing && selected === q?.correct_index
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: '#f5f5f5' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: '#ffffff' }}>
 
       {/* ── Progress header ──────────────────────────────────────────────────── */}
-      <div style={{ padding: '16px 20px 14px', borderBottom: '1px solid #F1F5FF', background: '#FAFBFF', flexShrink: 0 }}>
+      <div style={{ padding: '16px 20px 14px', borderBottom: '1px solid #F1F5FF', background: '#ffffff', flexShrink: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
           <span style={{ fontSize: 12, fontWeight: 700, color: '#2563EB', background: '#EFF6FF', padding: '4px 12px', borderRadius: 100, letterSpacing: '-0.01em' }}>
             {topic}
@@ -434,7 +434,7 @@ export function PracticePanel({ questions, loading, onClose, onWrongAnswer }) {
       </div>
 
       {/* ── Action bar ────────────────────────────────────────────────────────── */}
-      <div style={{ padding: '14px 20px', borderTop: '1px solid #F1F5FF', background: '#FAFBFF', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', flexShrink: 0 }}>
+      <div style={{ padding: '14px 20px', borderTop: '1px solid #F1F5FF', background: '#ffffff', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', flexShrink: 0 }}>
         {!isRevealing ? (
           <ConfirmButton disabled={selected === undefined} onClick={handleConfirm} />
         ) : currentQ < total - 1 ? (
