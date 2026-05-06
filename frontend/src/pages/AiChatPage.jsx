@@ -52,6 +52,7 @@ const STYLES = `
 .chat-messages {
   flex: 1; min-height: 0;
   overflow-y: auto; padding: 20px;
+  background: #ffffff;
 }
 
 /* Sidebar toggle button in top bar */
