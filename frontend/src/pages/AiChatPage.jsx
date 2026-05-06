@@ -1930,7 +1930,7 @@ export default function AiChatPage() {
       ) : (
         <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
           {/* Chat column */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', background: '#ffffff' }}>
           <div className="chat-active">
             <ConversationSummary messages={messages} />
             <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
