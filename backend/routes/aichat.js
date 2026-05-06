@@ -406,16 +406,11 @@ Return ONLY this JSON (no other text):
   ]
 }`;
 
-    const r = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      max_tokens: 6000,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: langInstruction + '\n\nYou are a math tutor. Output ONLY valid JSON matching the exact schema requested. No markdown, no extra text.' },
-        { role: 'user', content: prompt },
-      ],
+    const geminiResult = await geminiModel.generateContent({
+      contents: [{ role: 'user', parts: [{ text: langInstruction + '\n\nYou are a math tutor. Output ONLY valid JSON. No markdown.\n\n' + prompt }] }],
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 6000 },
     });
-    const raw = r.choices[0]?.message?.content || '';
+    const raw = geminiResult.response.text();
     console.log('[PRACTICE] raw length:', raw.length);
     console.log('[PRACTICE] raw (full):', raw);
 
@@ -741,17 +736,11 @@ EXAMPLE — if original was cubic extrema:
   ]
 }`;
 
-    const r = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      max_tokens: 3000,
-      temperature: 0.7,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: '수학 튜터. 반드시 지정된 JSON 형식만 출력.' },
-        { role: 'user', content: prompt },
-      ],
+    const geminiResult = await geminiModel.generateContent({
+      contents: [{ role: 'user', parts: [{ text: '수학 튜터. 반드시 지정된 JSON 형식만 출력.\n\n' + prompt }] }],
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 3000 },
     });
-    const raw = r.choices[0]?.message?.content || '{}';
+    const raw = geminiResult.response.text();
     const parsed = safeParseJson(extractJson(raw) || raw);
     const problems = Array.isArray(parsed?.problems) ? parsed.problems : [];
     if (!problems.length) return res.json({ ok: false });
@@ -818,17 +807,11 @@ JSON만 출력:
   ]
 }`;
 
-    const r = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      max_tokens: 1500,
-      temperature: 0.7,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: '수학 튜터. JSON만 출력.' },
-        { role: 'user', content: prompt },
-      ],
+    const geminiResult = await geminiModel.generateContent({
+      contents: [{ role: 'user', parts: [{ text: '수학 튜터. JSON만 출력.\n\n' + prompt }] }],
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 1500 },
     });
-    const raw = r.choices[0]?.message?.content || '{}';
+    const raw = geminiResult.response.text();
     const parsed = safeParseJson(extractJson(raw) || raw);
 
     const norm = (q) => {
