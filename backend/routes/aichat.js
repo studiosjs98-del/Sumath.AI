@@ -1,13 +1,10 @@
 const express = require('express');
 const OpenAI = require('openai');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { authenticate } = require('./middleware');
 const { getLanguageInstruction } = require('../utils/language');
 
 const router = express.Router();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-const geminiModel = gemini.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
 function extractJson(text) {
   if (!text || typeof text !== 'string') return null;
@@ -406,11 +403,16 @@ Return ONLY this JSON (no other text):
   ]
 }`;
 
-    const geminiResult = await geminiModel.generateContent({
-      contents: [{ role: 'user', parts: [{ text: langInstruction + '\n\nYou are a math tutor. Output ONLY valid JSON. No markdown.\n\n' + prompt }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 6000 },
+    const r = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 6000,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: langInstruction + '\nYou are a math tutor. Output ONLY valid JSON. No markdown.' },
+        { role: 'user', content: prompt }
+      ]
     });
-    const raw = geminiResult.response.text();
+    const raw = r.choices[0]?.message?.content || '';
     console.log('[PRACTICE] raw length:', raw.length);
     console.log('[PRACTICE] raw (full):', raw);
 
@@ -736,11 +738,16 @@ EXAMPLE — if original was cubic extrema:
   ]
 }`;
 
-    const geminiResult = await geminiModel.generateContent({
-      contents: [{ role: 'user', parts: [{ text: '수학 튜터. 반드시 지정된 JSON 형식만 출력.\n\n' + prompt }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 3000 },
+    const r = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 6000,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: '수학 튜터. 반드시 지정된 JSON 형식만 출력.' },
+        { role: 'user', content: prompt }
+      ]
     });
-    const raw = geminiResult.response.text();
+    const raw = r.choices[0]?.message?.content || '';
     const parsed = safeParseJson(extractJson(raw) || raw);
     const problems = Array.isArray(parsed?.problems) ? parsed.problems : [];
     if (!problems.length) return res.json({ ok: false });
@@ -807,11 +814,16 @@ JSON만 출력:
   ]
 }`;
 
-    const geminiResult = await geminiModel.generateContent({
-      contents: [{ role: 'user', parts: [{ text: '수학 튜터. JSON만 출력.\n\n' + prompt }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 1500 },
+    const r = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 6000,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: '수학 튜터. JSON만 출력.' },
+        { role: 'user', content: prompt }
+      ]
     });
-    const raw = geminiResult.response.text();
+    const raw = r.choices[0]?.message?.content || '';
     const parsed = safeParseJson(extractJson(raw) || raw);
 
     const norm = (q) => {
