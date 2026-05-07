@@ -242,8 +242,8 @@ function classifyDifficulty(message) {
   return 'easy';
 }
 
-async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini') {
-  const oaiMessages = [
+function buildOaiMessages(systemPrompt, messages) {
+  return [
     { role: 'system', content: systemPrompt },
     ...messages.map(m => {
       if (m.imageBase64 && m.role === 'user') {
@@ -261,27 +261,21 @@ async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini') 
       };
     })
   ];
+}
 
-  const isO3 = model === 'o3' || model === 'o1' || model.startsWith('o3') || model.startsWith('o1')
-  const maxTok = 8000
-
-  console.log('[AI Request]', {
-    model,
-    max_tokens: maxTok,
-    systemPromptLength: systemPrompt?.length,
-    messagesCount: messages?.length,
-  })
+// Streaming path — gpt-4o-mini only
+async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini') {
+  const oaiMessages = buildOaiMessages(systemPrompt, messages);
 
   const stream = await openai.chat.completions.create({
-    model: model,
-    ...(isO3 ? { max_completion_tokens: maxTok } : { max_tokens: maxTok }),
-    ...(!isO3 ? { temperature: 0.1 } : {}),
+    model,
+    max_tokens: 8000,
+    temperature: 0.1,
     stream: true,
     messages: oaiMessages,
   });
 
-  // Send a keep-alive comment every 8 seconds so proxies and the client's
-  // inactivity timer do not close the connection during slow reasoning.
+  // Keep-alive comments prevent proxy/client timeouts during slow streaming.
   let keepAliveTimer = setInterval(() => {
     try { res.write(': keep-alive\n\n') } catch (_) { clearInterval(keepAliveTimer) }
   }, 8000);
@@ -294,6 +288,41 @@ async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini') 
   } finally {
     clearInterval(keepAliveTimer);
   }
+}
+
+// Hard-question signals: returns true if the question warrants o3-mini
+function isHardQuestion(lastText, hasImage) {
+  if (hasImage) return true;
+  if (lastText.length > 200) return true;
+
+  const keywords = [
+    '적분', '미분', '로그', '증명', '극한', '수열', '급수', '행렬', '벡터', '확률',
+    'proof', 'integral', 'derivative', 'limit', 'series', 'matrix', 'vector',
+    'probability', 'log', 'ln'
+  ];
+  if (keywords.some(kw => lastText.includes(kw))) return true;
+
+  // Advanced LaTeX notation
+  if (/\\int|\\sum|\\lim|\\sqrt|\\frac\{[^}]*\{/.test(lastText)) return true;
+
+  return false;
+}
+
+// Non-streaming path — o3-mini, collects full response then emits as one SSE chunk
+async function callO3Mini(systemPrompt, messages, res) {
+  const oaiMessages = buildOaiMessages(systemPrompt, messages);
+
+  const response = await openai.chat.completions.create(
+    {
+      model: 'o3-mini',
+      max_completion_tokens: 8000,
+      messages: oaiMessages,
+    },
+    { timeout: 120000 }
+  );
+
+  const text = response.choices[0]?.message?.content || '';
+  if (text) res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
 }
 
 // ── Main route ───────────────────────────────────────────────────────────────
@@ -312,19 +341,17 @@ router.post('/message', async (req, res) => {
 
     const hasImage = messages.some(m => m.imageBase64);
     const lastText = extractMathQuery(messages) || '';
-    const textTier = classifyDifficulty(lastText);
-    const tier = hasImage ? 'killer' : textTier;
-    const isHardQuestion = (tier === 'killer' || tier === 'hard');
+    const hard = isHardQuestion(lastText, hasImage);
+    const modelName = hard ? 'o3-mini' : 'gpt-4o-mini';
+
+    console.log('[model-router] using:', modelName, 'for message length:', lastText.length);
 
     const basePrompt = buildSystemPrompt(grade, weakTopics);
-
     const systemPrompt = langInstruction + '\n\n' + basePrompt;
 
-    if (tier === 'killer' || tier === 'hard') {
-      console.log(`[HARD+] o3 | "${lastText.slice(0, 60)}"`);
-      await streamOpenAI(systemPrompt, messages, res, 'o3');
+    if (hard) {
+      await callO3Mini(systemPrompt, messages, res);
     } else {
-      console.log(`[EASY/MED] gpt-4o-mini | "${lastText.slice(0, 60)}"`);
       await streamOpenAI(systemPrompt, messages, res, 'gpt-4o-mini');
     }
 
