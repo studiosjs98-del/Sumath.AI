@@ -1,65 +1,82 @@
 const express = require('express');
 const { authenticate } = require('./middleware');
-const db = require('../database/db');
+const supabase = require('../database/supabase');
 
 const router = express.Router();
 
 // List all chats for the authenticated user, newest first
-router.get('/', authenticate, (req, res) => {
+router.get('/', authenticate, async (req, res) => {
   try {
-    const rows = db.prepare(
-      'SELECT id, title, updated_at FROM chat_histories WHERE student_id = ? ORDER BY updated_at DESC'
-    ).all(req.studentId);
-    res.json(rows);
+    const { data, error } = await supabase
+      .from('chat_histories')
+      .select('id, title, updated_at')
+      .eq('student_id', req.studentId)
+      .order('updated_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // Get a single chat with its full messages
-router.get('/:id', authenticate, (req, res) => {
+router.get('/:id', authenticate, async (req, res) => {
   try {
-    const row = db.prepare(
-      'SELECT id, title, messages FROM chat_histories WHERE id = ? AND student_id = ?'
-    ).get(req.params.id, req.studentId);
-    if (!row) return res.status(404).json({ error: 'Not found' });
-    res.json({ id: row.id, title: row.title, messages: JSON.parse(row.messages) });
+    const { data, error } = await supabase
+      .from('chat_histories')
+      .select('id, title, messages')
+      .eq('id', req.params.id)
+      .eq('student_id', req.studentId)
+      .single();
+    if (error || !data) return res.status(404).json({ error: 'Not found' });
+    const messages = typeof data.messages === 'string' ? JSON.parse(data.messages) : data.messages;
+    res.json({ id: data.id, title: data.title, messages });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // Create a new chat
-router.post('/', authenticate, (req, res) => {
+router.post('/', authenticate, async (req, res) => {
   try {
     const { title, messages } = req.body;
     if (!title || !Array.isArray(messages)) return res.status(400).json({ error: 'title and messages required' });
-    const result = db.prepare(
-      'INSERT INTO chat_histories (student_id, title, messages) VALUES (?, ?, ?)'
-    ).run(req.studentId, title.slice(0, 120), JSON.stringify(messages));
-    res.json({ id: result.lastInsertRowid });
+    const { data, error } = await supabase
+      .from('chat_histories')
+      .insert({ student_id: req.studentId, title: title.slice(0, 120), messages: JSON.stringify(messages) })
+      .select('id')
+      .single();
+    if (error) throw error;
+    res.json({ id: data.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // Update an existing chat's messages (and optionally title)
-router.put('/:id', authenticate, (req, res) => {
+router.put('/:id', authenticate, async (req, res) => {
   try {
     const { messages, title } = req.body;
-    const existing = db.prepare('SELECT id FROM chat_histories WHERE id = ? AND student_id = ?')
-      .get(req.params.id, req.studentId);
+    const { data: existing } = await supabase
+      .from('chat_histories')
+      .select('id')
+      .eq('id', req.params.id)
+      .eq('student_id', req.studentId)
+      .single();
     if (!existing) return res.status(404).json({ error: 'Not found' });
 
-    if (title !== undefined) {
-      db.prepare(
-        "UPDATE chat_histories SET messages = ?, title = ?, updated_at = datetime('now') WHERE id = ? AND student_id = ?"
-      ).run(JSON.stringify(messages), title.slice(0, 120), req.params.id, req.studentId);
-    } else {
-      db.prepare(
-        "UPDATE chat_histories SET messages = ?, updated_at = datetime('now') WHERE id = ? AND student_id = ?"
-      ).run(JSON.stringify(messages), req.params.id, req.studentId);
-    }
+    const updateData = {
+      messages: JSON.stringify(messages),
+      updated_at: new Date().toISOString()
+    };
+    if (title !== undefined) updateData.title = title.slice(0, 120);
+
+    const { error } = await supabase
+      .from('chat_histories')
+      .update(updateData)
+      .eq('id', req.params.id)
+      .eq('student_id', req.studentId);
+    if (error) throw error;
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -67,10 +84,14 @@ router.put('/:id', authenticate, (req, res) => {
 });
 
 // Delete a chat
-router.delete('/:id', authenticate, (req, res) => {
+router.delete('/:id', authenticate, async (req, res) => {
   try {
-    db.prepare('DELETE FROM chat_histories WHERE id = ? AND student_id = ?')
-      .run(req.params.id, req.studentId);
+    const { error } = await supabase
+      .from('chat_histories')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('student_id', req.studentId);
+    if (error) throw error;
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

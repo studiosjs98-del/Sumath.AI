@@ -1,5 +1,5 @@
 const express = require('express');
-const db = require('../database/db');
+const supabase = require('../database/supabase');
 const { recordAttempt, QUALITY_MAP } = require('../services/spacedRepetition');
 const { calculateXP, updateStudentRank, updateStreak, recordMistake } = require('../services/analytics');
 const { authenticate } = require('./middleware');
@@ -7,99 +7,140 @@ const { authenticate } = require('./middleware');
 const router = express.Router();
 
 // Start a new session
-router.post('/start', authenticate, (req, res) => {
-  const result = db.prepare(
-    'INSERT INTO sessions (student_id) VALUES (?)'
-  ).run(req.studentId);
+router.post('/start', authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('sessions')
+      .insert({ student_id: req.studentId })
+      .select('id')
+      .single();
+    if (error) throw error;
 
-  updateStreak(req.studentId);
+    await updateStreak(req.studentId);
 
-  res.json({ sessionId: result.lastInsertRowid });
+    res.json({ sessionId: data.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Submit an attempt
-router.post('/:sessionId/attempt', authenticate, (req, res) => {
-  const { problemId, quality: qualityLabel, timeSpent, hintsUsed, studentSteps } = req.body;
-  const { sessionId } = req.params;
+router.post('/:sessionId/attempt', authenticate, async (req, res) => {
+  try {
+    const { problemId, quality: qualityLabel, timeSpent, hintsUsed, studentSteps } = req.body;
+    const { sessionId } = req.params;
 
-  if (!QUALITY_MAP.hasOwnProperty(qualityLabel)) {
-    return res.status(400).json({ error: '올바른 평가를 선택해주세요: 틀림, 헷갈림, 맞음' });
+    if (!Object.prototype.hasOwnProperty.call(QUALITY_MAP, qualityLabel)) {
+      return res.status(400).json({ error: '올바른 평가를 선택해주세요: 틀림, 헷갈림, 맞음' });
+    }
+
+    const quality = QUALITY_MAP[qualityLabel];
+
+    // Get problem details
+    const { data: problem } = await supabase
+      .from('problems')
+      .select('topic, curriculum, grade, difficulty')
+      .eq('id', problemId)
+      .single();
+
+    // Record mistake if wrong
+    if (quality < 3 && problem) {
+      await recordMistake(req.studentId, problem.topic, problem.curriculum, problem.grade);
+    }
+
+    // Update spaced repetition
+    const srUpdate = await recordAttempt(req.studentId, problemId, qualityLabel, hintsUsed);
+
+    // Calculate XP
+    const difficulty = problem?.difficulty || 1;
+    const xpEarned = calculateXP(quality, difficulty, hintsUsed || 0);
+
+    // Record session attempt
+    await supabase.from('session_attempts').insert({
+      session_id: sessionId,
+      problem_id: problemId,
+      student_id: req.studentId,
+      quality,
+      time_spent_seconds: timeSpent || 0,
+      hints_used: hintsUsed || 0,
+      student_steps: JSON.stringify(studentSteps || [])
+    });
+
+    // Update session stats (fetch then increment)
+    const { data: session } = await supabase
+      .from('sessions')
+      .select('problems_attempted, problems_correct, xp_earned')
+      .eq('id', sessionId)
+      .single();
+
+    if (session) {
+      await supabase.from('sessions').update({
+        problems_attempted: session.problems_attempted + 1,
+        problems_correct: session.problems_correct + (quality >= 3 ? 1 : 0),
+        xp_earned: session.xp_earned + xpEarned
+      }).eq('id', sessionId);
+    }
+
+    // Update student XP
+    if (xpEarned > 0) {
+      const { data: studentData } = await supabase
+        .from('students')
+        .select('xp')
+        .eq('id', req.studentId)
+        .single();
+      if (studentData) {
+        await supabase.from('students').update({ xp: studentData.xp + xpEarned }).eq('id', req.studentId);
+      }
+      await updateStudentRank(req.studentId);
+    }
+
+    // Get updated student stats
+    const { data: updatedStudent } = await supabase
+      .from('students')
+      .select('xp, level, rank, streak_days')
+      .eq('id', req.studentId)
+      .single();
+
+    res.json({
+      xpEarned,
+      nextReview: srUpdate.next_review,
+      intervalDays: srUpdate.interval_days,
+      student: updatedStudent
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
-
-  const quality = QUALITY_MAP[qualityLabel];
-
-  // Get problem details for mistake tracking
-  const problem = db.prepare('SELECT topic, curriculum, grade FROM problems WHERE id = ?').get(problemId);
-
-  // Record mistake if wrong
-  if (quality < 3 && problem) {
-    recordMistake(req.studentId, problem.topic, problem.curriculum, problem.grade);
-  }
-
-  // Update spaced repetition
-  const srUpdate = recordAttempt(db, req.studentId, problemId, qualityLabel, hintsUsed);
-
-  // Calculate XP
-  const difficulty = db.prepare('SELECT difficulty FROM problems WHERE id = ?').get(problemId)?.difficulty || 1;
-  const xpEarned = calculateXP(quality, difficulty, hintsUsed || 0);
-
-  // Record session attempt
-  db.prepare(`
-    INSERT INTO session_attempts
-      (session_id, problem_id, student_id, quality, time_spent_seconds, hints_used, student_steps)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(sessionId, problemId, req.studentId, quality, timeSpent || 0, hintsUsed || 0, JSON.stringify(studentSteps || []));
-
-  // Update session stats
-  db.prepare(`
-    UPDATE sessions SET
-      problems_attempted = problems_attempted + 1,
-      problems_correct = problems_correct + ?,
-      xp_earned = xp_earned + ?
-    WHERE id = ?
-  `).run(quality >= 3 ? 1 : 0, xpEarned, sessionId);
-
-  // Update student XP
-  if (xpEarned > 0) {
-    db.prepare('UPDATE students SET xp = xp + ? WHERE id = ?').run(xpEarned, req.studentId);
-    updateStudentRank(req.studentId);
-  }
-
-  // Get updated student stats
-  const updatedStudent = db.prepare(
-    'SELECT xp, level, rank, streak_days FROM students WHERE id = ?'
-  ).get(req.studentId);
-
-  res.json({
-    xpEarned,
-    nextReview: srUpdate.next_review,
-    intervalDays: srUpdate.interval_days,
-    student: updatedStudent
-  });
 });
 
 // End a session and get summary
 router.post('/:sessionId/end', authenticate, async (req, res) => {
-  const { sessionId } = req.params;
+  try {
+    const { sessionId } = req.params;
 
-  db.prepare(
-    "UPDATE sessions SET ended_at = datetime('now') WHERE id = ? AND student_id = ?"
-  ).run(sessionId, req.studentId);
+    await supabase.from('sessions').update({ ended_at: new Date().toISOString() })
+      .eq('id', sessionId)
+      .eq('student_id', req.studentId);
 
-  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+    const { data: session } = await supabase
+      .from('sessions')
+      .select('*')
+      .eq('id', sessionId)
+      .single();
 
-  // Get weak topics
-  const weakTopics = db.prepare(`
-    SELECT mp.topic, mp.error_count
-    FROM mistake_patterns mp
-    WHERE mp.student_id = ?
-    ORDER BY mp.error_count DESC LIMIT 3
-  `).all(req.studentId);
+    const { data: weakTopics } = await supabase
+      .from('mistake_patterns')
+      .select('topic, error_count')
+      .eq('student_id', req.studentId)
+      .order('error_count', { ascending: false })
+      .limit(3);
 
-  res.json({
-    session,
-    weakTopics
-  });
+    res.json({ session, weakTopics: weakTopics || [] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;

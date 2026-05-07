@@ -1,143 +1,169 @@
 const express = require('express');
-const db = require('../database/db');
+const supabase = require('../database/supabase');
 const { getDueProblems } = require('../services/spacedRepetition');
 const { authenticate } = require('./middleware');
 const { buildMcOptionsAsync } = require('../utils/aiMcOptions');
 
 const router = express.Router();
 
-/**
- * Enrich a raw DB problem row with parsed JSON fields and MC options.
- * Reads mc_options from cache if present; otherwise generates via AI and caches.
- */
 async function enrichProblem(p) {
-  let mcData = null
+  let mcData = null;
 
-  if (p.mc_options) {
+  const rawMc = p.mc_options;
+  if (rawMc) {
     try {
-      const parsed = JSON.parse(p.mc_options)
-      // Validate cache: must have options array and correctIndex
+      const parsed = typeof rawMc === 'string' ? JSON.parse(rawMc) : rawMc;
       if (parsed && Array.isArray(parsed.options) && parsed.options.length === 4 &&
           typeof parsed.correctIndex === 'number') {
-        mcData = parsed
+        mcData = parsed;
       }
     } catch {}
   }
 
   if (!mcData) {
-    // Generate AI options and cache them
-    mcData = await buildMcOptionsAsync(p)
+    mcData = await buildMcOptionsAsync(p);
     try {
-      db.prepare('UPDATE problems SET mc_options = ? WHERE id = ?')
-        .run(JSON.stringify(mcData), p.id)
+      await supabase.from('problems')
+        .update({ mc_options: JSON.stringify(mcData) })
+        .eq('id', p.id);
     } catch {}
   }
 
   return {
     ...p,
-    hints: (() => { try { return JSON.parse(p.hints || '[]') } catch { return [] } })(),
-    tags: (() => { try { return JSON.parse(p.tags || '[]') } catch { return [] } })(),
-    solution_steps: (() => { try { return JSON.parse(p.solution_steps || '[]') } catch { return [] } })(),
+    hints: (() => { try { return typeof p.hints === 'string' ? JSON.parse(p.hints || '[]') : (p.hints || []) } catch { return [] } })(),
+    tags: (() => { try { return typeof p.tags === 'string' ? JSON.parse(p.tags || '[]') : (p.tags || []) } catch { return [] } })(),
+    solution_steps: (() => { try { return typeof p.solution_steps === 'string' ? JSON.parse(p.solution_steps || '[]') : (p.solution_steps || []) } catch { return [] } })(),
     mc_options: mcData.options,
     correct_option_index: mcData.correctIndex
-  }
+  };
 }
 
-// ── Routes ────────────────────────────────────────────────────────────────────
-
 // Get count of due problems
-router.get('/due/count', authenticate, (req, res) => {
-  const { grade } = req.query;
-  const now = new Date().toISOString();
+router.get('/due/count', authenticate, async (req, res) => {
+  try {
+    const { grade } = req.query;
+    const now = new Date().toISOString();
 
-  const dueCount = db.prepare(`
-    SELECT COUNT(*) as count FROM student_problem_records
-    WHERE student_id = ? AND next_review <= ?
-  `).get(req.studentId, now);
+    const { count: dueCount } = await supabase
+      .from('student_problem_records')
+      .select('*', { count: 'exact', head: true })
+      .eq('student_id', req.studentId)
+      .lte('next_review', now);
 
-  const newCount = db.prepare(`
-    SELECT COUNT(*) as count FROM problems p
-    WHERE p.id NOT IN (
-      SELECT problem_id FROM student_problem_records WHERE student_id = ?
-    ) ${grade ? 'AND p.grade = ?' : ''}
-    LIMIT 10
-  `).get(req.studentId, ...(grade ? [grade] : []));
+    // Get already-seen problem IDs
+    const { data: seenRecords } = await supabase
+      .from('student_problem_records')
+      .select('problem_id')
+      .eq('student_id', req.studentId);
+    const seenIds = (seenRecords || []).map(r => r.problem_id);
 
-  res.json({
-    due: dueCount.count,
-    new: newCount.count,
-    total: dueCount.count + Math.min(newCount.count, 5)
-  });
+    let newQuery = supabase.from('problems').select('*', { count: 'exact', head: true });
+    if (seenIds.length > 0) newQuery = newQuery.not('id', 'in', `(${seenIds.join(',')})`);
+    if (grade) newQuery = newQuery.eq('grade', grade);
+    const { count: rawNewCount } = await newQuery;
+    const newCount = Math.min(rawNewCount || 0, 10);
+
+    res.json({
+      due: dueCount || 0,
+      new: newCount,
+      total: (dueCount || 0) + Math.min(newCount, 5)
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Get distinct topics grouped by grade (optionally filtered by curriculum)
-router.get('/topics', authenticate, (req, res) => {
-  const { grade, curriculum } = req.query;
-  const params = [];
-  const conditions = [];
-  if (grade) { conditions.push('p.grade = ?'); params.push(grade); }
-  if (curriculum) { conditions.push('p.curriculum = ?'); params.push(curriculum); }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+// Get distinct topics grouped by grade
+router.get('/topics', authenticate, async (req, res) => {
+  try {
+    const { grade, curriculum } = req.query;
+    let query = supabase.from('problems').select('topic, grade, curriculum');
+    if (grade) query = query.eq('grade', grade);
+    if (curriculum) query = query.eq('curriculum', curriculum);
+    query = query.order('grade').order('curriculum').order('topic');
 
-  const topics = db.prepare(`
-    SELECT p.topic, p.grade, p.curriculum,
-      COUNT(*) as total_count,
-      MIN(p.difficulty) as min_diff, MAX(p.difficulty) as max_diff
-    FROM problems p
-    ${where}
-    GROUP BY p.topic, p.grade, p.curriculum
-    ORDER BY p.grade, p.curriculum, p.topic
-  `).all(...params);
+    const { data: rows } = await query;
 
-  // Build grouped map: { curriculumName: [topic, ...] }
-  const grouped = {};
-  for (const t of topics) {
-    if (!grouped[t.curriculum]) grouped[t.curriculum] = [];
-    grouped[t.curriculum].push(t);
+    // Aggregate counts in JS
+    const topicMap = {};
+    for (const r of rows || []) {
+      const key = `${r.grade}::${r.curriculum}::${r.topic}`;
+      if (!topicMap[key]) topicMap[key] = { topic: r.topic, grade: r.grade, curriculum: r.curriculum, total_count: 0 };
+      topicMap[key].total_count++;
+    }
+    const topics = Object.values(topicMap);
+    const grouped = {};
+    for (const t of topics) {
+      if (!grouped[t.curriculum]) grouped[t.curriculum] = [];
+      grouped[t.curriculum].push(t);
+    }
+
+    res.json({ topics, grouped });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
-
-  res.json({ topics, grouped });
 });
 
 // Get distinct curriculum categories for a grade
-router.get('/categories', authenticate, (req, res) => {
-  const { grade } = req.query;
-  const params = [];
-  let where = '';
-  if (grade) { where = 'WHERE grade = ?'; params.push(grade); }
+router.get('/categories', authenticate, async (req, res) => {
+  try {
+    const { grade } = req.query;
+    let query = supabase.from('problems').select('curriculum');
+    if (grade) query = query.eq('grade', grade);
+    const { data } = await query.order('curriculum');
 
-  const rows = db.prepare(`
-    SELECT DISTINCT curriculum
-    FROM problems
-    ${where}
-    ORDER BY curriculum
-  `).all(...params);
-
-  res.json({ categories: rows.map(r => r.curriculum) });
+    const categories = [...new Set((data || []).map(r => r.curriculum))];
+    res.json({ categories });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Get per-topic accuracy stats for the logged-in student
-router.get('/topic-stats', authenticate, (req, res) => {
-  const stats = db.prepare(`
-    SELECT p.topic, p.grade,
-      COUNT(sa.id) as total_attempts,
-      ROUND(100.0 * SUM(CASE WHEN sa.quality >= 3 THEN 1 ELSE 0 END) / COUNT(sa.id), 0) as accuracy,
-      MAX(sa.attempted_at) as last_studied
-    FROM session_attempts sa
-    JOIN problems p ON sa.problem_id = p.id
-    WHERE sa.student_id = ?
-    GROUP BY p.topic, p.grade
-  `).all(req.studentId);
-  res.json({ stats });
+router.get('/topic-stats', authenticate, async (req, res) => {
+  try {
+    const { data: attempts } = await supabase
+      .from('session_attempts')
+      .select('quality, attempted_at, problems!inner(topic, grade)')
+      .eq('student_id', req.studentId);
+
+    const topicMap = {};
+    for (const a of attempts || []) {
+      const p = a.problems;
+      if (!p) continue;
+      const key = `${p.grade}::${p.topic}`;
+      if (!topicMap[key]) topicMap[key] = { topic: p.topic, grade: p.grade, total: 0, correct: 0, last_studied: null };
+      topicMap[key].total++;
+      if (a.quality >= 3) topicMap[key].correct++;
+      if (!topicMap[key].last_studied || a.attempted_at > topicMap[key].last_studied) {
+        topicMap[key].last_studied = a.attempted_at;
+      }
+    }
+
+    const stats = Object.values(topicMap).map(t => ({
+      topic: t.topic,
+      grade: t.grade,
+      total_attempts: t.total,
+      accuracy: t.total > 0 ? Math.round(100 * t.correct / t.total) : 0,
+      last_studied: t.last_studied
+    }));
+
+    res.json({ stats });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Get due problems for study session
-// difficulty param: 'basic' (<=2) | 'medium' (=3) | 'advanced' (>=4)
 router.get('/due', authenticate, async (req, res) => {
   try {
     const { grade, topic, curriculum, difficulty, limit = 15 } = req.query;
-    const raw = getDueProblems(
-      db,
+    const raw = await getDueProblems(
       req.studentId,
       grade || null,
       parseInt(limit),
@@ -157,17 +183,12 @@ router.get('/due', authenticate, async (req, res) => {
 router.get('/', authenticate, async (req, res) => {
   try {
     const { grade, curriculum } = req.query;
-    let query = 'SELECT * FROM problems';
-    const params = [];
-    if (grade || curriculum) {
-      query += ' WHERE';
-      if (grade) { query += ' grade = ?'; params.push(grade); }
-      if (grade && curriculum) query += ' AND';
-      if (curriculum) { query += ' curriculum = ?'; params.push(curriculum); }
-    }
-    query += ' ORDER BY grade, difficulty';
-    const raw = db.prepare(query).all(...params);
-    const problems = await Promise.all(raw.map(enrichProblem));
+    let query = supabase.from('problems').select('*').order('grade').order('difficulty');
+    if (grade) query = query.eq('grade', grade);
+    if (curriculum) query = query.eq('curriculum', curriculum);
+
+    const { data: raw } = await query;
+    const problems = await Promise.all((raw || []).map(enrichProblem));
     res.json({ problems });
   } catch (err) {
     console.error(err);
@@ -178,7 +199,11 @@ router.get('/', authenticate, async (req, res) => {
 // Get a single problem
 router.get('/:id', authenticate, async (req, res) => {
   try {
-    const p = db.prepare('SELECT * FROM problems WHERE id = ?').get(req.params.id);
+    const { data: p } = await supabase
+      .from('problems')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
     if (!p) return res.status(404).json({ error: '문제를 찾을 수 없습니다.' });
     res.json(await enrichProblem(p));
   } catch (err) {
@@ -187,38 +212,30 @@ router.get('/:id', authenticate, async (req, res) => {
   }
 });
 
-/**
- * Regenerate MC options for ALL problems using AI.
- * Clears cached options first, then processes in batches of 5 (parallel).
- * POST /problems/regen-mc
- */
+// Regenerate MC options for ALL problems
 router.post('/regen-mc', authenticate, async (req, res) => {
-  // Stream progress so the caller can see it's working
-  res.setHeader('Content-Type', 'application/json')
+  res.setHeader('Content-Type', 'application/json');
 
-  const problems = db.prepare('SELECT * FROM problems ORDER BY id').all()
-  let done = 0, failed = 0
+  const { data: problems } = await supabase.from('problems').select('*').order('id');
+  let done = 0, failed = 0;
 
-  // Process in batches of 5 to avoid rate limits
-  const BATCH = 5
-  for (let i = 0; i < problems.length; i += BATCH) {
-    const batch = problems.slice(i, i + BATCH)
+  const BATCH = 5;
+  for (let i = 0; i < (problems || []).length; i += BATCH) {
+    const batch = (problems || []).slice(i, i + BATCH);
     await Promise.all(batch.map(async (p) => {
       try {
-        const { buildMcOptionsAsync } = require('../utils/aiMcOptions')
-        const mcData = await buildMcOptionsAsync(p)
-        db.prepare('UPDATE problems SET mc_options = ? WHERE id = ?')
-          .run(JSON.stringify(mcData), p.id)
-        done++
+        const mcData = await buildMcOptionsAsync(p);
+        await supabase.from('problems').update({ mc_options: JSON.stringify(mcData) }).eq('id', p.id);
+        done++;
       } catch (err) {
-        console.error(`[regen-mc] Problem ${p.id} failed:`, err.message)
-        failed++
+        console.error(`[regen-mc] Problem ${p.id} failed:`, err.message);
+        failed++;
       }
-    }))
+    }));
   }
 
-  res.json({ done, failed, total: problems.length })
-})
+  res.json({ done, failed, total: (problems || []).length });
+});
 
 module.exports = router;
 module.exports.enrichProblem = enrichProblem;

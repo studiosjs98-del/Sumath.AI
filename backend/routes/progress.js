@@ -1,5 +1,5 @@
 const express = require('express');
-const db = require('../database/db');
+const supabase = require('../database/supabase');
 const { getWeakTopics, getPerformanceBreakdown, getRecentSessions } = require('../services/analytics');
 const { generateSessionFeedback } = require('../services/aiTutor');
 const { authenticate } = require('./middleware');
@@ -7,112 +7,179 @@ const { authenticate } = require('./middleware');
 const router = express.Router();
 
 // Get student overview
-router.get('/overview', authenticate, (req, res) => {
-  const student = db.prepare(
-    'SELECT id, username, display_name, grade_level, xp, level, rank, streak_days, last_study_date FROM students WHERE id = ?'
-  ).get(req.studentId);
+router.get('/overview', authenticate, async (req, res) => {
+  try {
+    const now = new Date().toISOString();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-  const totalAttempts = db.prepare(
-    'SELECT COUNT(*) as count FROM session_attempts WHERE student_id = ?'
-  ).get(req.studentId);
+    const [
+      { data: student },
+      { count: totalAttempts },
+      { count: correctAttempts },
+      { count: dueCount },
+      { count: todayAttempts }
+    ] = await Promise.all([
+      supabase.from('students')
+        .select('id, username, display_name, grade_level, xp, level, rank, streak_days, last_study_date')
+        .eq('id', req.studentId).single(),
+      supabase.from('session_attempts').select('*', { count: 'exact', head: true }).eq('student_id', req.studentId),
+      supabase.from('session_attempts').select('*', { count: 'exact', head: true }).eq('student_id', req.studentId).gte('quality', 3),
+      supabase.from('student_problem_records').select('*', { count: 'exact', head: true }).eq('student_id', req.studentId).lte('next_review', now),
+      supabase.from('session_attempts').select('*', { count: 'exact', head: true }).eq('student_id', req.studentId).gte('attempted_at', today.toISOString())
+    ]);
 
-  const correctAttempts = db.prepare(
-    'SELECT COUNT(*) as count FROM session_attempts WHERE student_id = ? AND quality >= 3'
-  ).get(req.studentId);
-
-  const dueCount = db.prepare(`
-    SELECT COUNT(*) as count FROM student_problem_records
-    WHERE student_id = ? AND next_review <= datetime('now')
-  `).get(req.studentId);
-
-  const todayAttempts = db.prepare(`
-    SELECT COUNT(*) as count FROM session_attempts
-    WHERE student_id = ? AND DATE(attempted_at) = DATE('now')
-  `).get(req.studentId);
-
-  res.json({
-    student,
-    stats: {
-      totalAttempts: totalAttempts.count,
-      correctAttempts: correctAttempts.count,
-      accuracy: totalAttempts.count > 0
-        ? Math.round(100 * correctAttempts.count / totalAttempts.count)
-        : 0,
-      dueForReview: dueCount.count,
-      todayAttempts: todayAttempts.count
-    }
-  });
+    res.json({
+      student,
+      stats: {
+        totalAttempts: totalAttempts || 0,
+        correctAttempts: correctAttempts || 0,
+        accuracy: (totalAttempts || 0) > 0
+          ? Math.round(100 * (correctAttempts || 0) / (totalAttempts || 0))
+          : 0,
+        dueForReview: dueCount || 0,
+        todayAttempts: todayAttempts || 0
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Get all wrong answers (오답 노트) — distinct problems, most recently wrong first
-router.get('/wrong-answers', authenticate, (req, res) => {
-  const problems = db.prepare(`
-    SELECT p.id, p.grade, p.topic, p.unit, p.curriculum, p.difficulty,
-           p.question_latex, p.answer_latex, p.solution_steps, p.hints,
-           COUNT(sa.id) as wrong_count,
-           MAX(sa.attempted_at) as last_wrong_at
-    FROM session_attempts sa
-    JOIN problems p ON sa.problem_id = p.id
-    WHERE sa.student_id = ? AND sa.quality < 3
-    GROUP BY p.id
-    ORDER BY last_wrong_at DESC
-    LIMIT 100
-  `).all(req.studentId);
+router.get('/wrong-answers', authenticate, async (req, res) => {
+  try {
+    const { data: attempts } = await supabase
+      .from('session_attempts')
+      .select('problem_id, attempted_at, problems!inner(id, grade, topic, unit, curriculum, difficulty, question_latex, answer_latex, solution_steps, hints)')
+      .eq('student_id', req.studentId)
+      .lt('quality', 3)
+      .order('attempted_at', { ascending: false });
 
-  res.json({
-    problems: problems.map(p => ({
-      ...p,
-      hints: (() => { try { return JSON.parse(p.hints || '[]') } catch { return [] } })(),
-      solution_steps: (() => { try { return JSON.parse(p.solution_steps || '[]') } catch { return [] } })()
-    }))
-  });
+    const problemMap = {};
+    for (const a of attempts || []) {
+      const p = a.problems;
+      if (!p) continue;
+      if (!problemMap[p.id]) {
+        problemMap[p.id] = { ...p, wrong_count: 0, last_wrong_at: null };
+      }
+      problemMap[p.id].wrong_count++;
+      if (!problemMap[p.id].last_wrong_at || a.attempted_at > problemMap[p.id].last_wrong_at) {
+        problemMap[p.id].last_wrong_at = a.attempted_at;
+      }
+    }
+
+    const problems = Object.values(problemMap)
+      .sort((a, b) => new Date(b.last_wrong_at) - new Date(a.last_wrong_at))
+      .slice(0, 100)
+      .map(p => ({
+        ...p,
+        hints: (() => { try { return typeof p.hints === 'string' ? JSON.parse(p.hints || '[]') : (p.hints || []) } catch { return [] } })(),
+        solution_steps: (() => { try { return typeof p.solution_steps === 'string' ? JSON.parse(p.solution_steps || '[]') : (p.solution_steps || []) } catch { return [] } })()
+      }));
+
+    res.json({ problems });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Get recent wrong answers
-router.get('/recent-wrong', authenticate, (req, res) => {
-  const wrong = db.prepare(`
-    SELECT sa.id, sa.problem_id, sa.quality, sa.attempted_at,
-           p.question_latex, p.topic, p.grade, p.difficulty, p.curriculum
-    FROM session_attempts sa
-    JOIN problems p ON sa.problem_id = p.id
-    WHERE sa.student_id = ? AND sa.quality < 3
-    ORDER BY sa.attempted_at DESC
-    LIMIT 3
-  `).all(req.studentId);
-  res.json({ wrong });
+router.get('/recent-wrong', authenticate, async (req, res) => {
+  try {
+    const { data: attempts } = await supabase
+      .from('session_attempts')
+      .select('id, problem_id, quality, attempted_at, problems!inner(question_latex, topic, grade, difficulty, curriculum)')
+      .eq('student_id', req.studentId)
+      .lt('quality', 3)
+      .order('attempted_at', { ascending: false })
+      .limit(3);
+
+    const wrong = (attempts || []).map(a => ({
+      id: a.id,
+      problem_id: a.problem_id,
+      quality: a.quality,
+      attempted_at: a.attempted_at,
+      question_latex: a.problems?.question_latex,
+      topic: a.problems?.topic,
+      grade: a.problems?.grade,
+      difficulty: a.problems?.difficulty,
+      curriculum: a.problems?.curriculum
+    }));
+
+    res.json({ wrong });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Get weak topics
-router.get('/weak-topics', authenticate, (req, res) => {
-  const weakTopics = getWeakTopics(req.studentId);
-  res.json({ weakTopics });
+router.get('/weak-topics', authenticate, async (req, res) => {
+  try {
+    const weakTopics = await getWeakTopics(req.studentId);
+    res.json({ weakTopics });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Get performance breakdown
-router.get('/breakdown', authenticate, (req, res) => {
-  const breakdown = getPerformanceBreakdown(req.studentId);
-  res.json({ breakdown });
+router.get('/breakdown', authenticate, async (req, res) => {
+  try {
+    const breakdown = await getPerformanceBreakdown(req.studentId);
+    res.json({ breakdown });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Get session history
-router.get('/sessions', authenticate, (req, res) => {
-  const sessions = getRecentSessions(req.studentId);
-  res.json({ sessions });
+router.get('/sessions', authenticate, async (req, res) => {
+  try {
+    const sessions = await getRecentSessions(req.studentId);
+    res.json({ sessions });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Get today's review queue
-router.get('/review-queue', authenticate, (req, res) => {
-  const queue = db.prepare(`
-    SELECT p.id, p.grade, p.topic, p.difficulty, p.question_latex,
-           spr.next_review, spr.ease_factor, spr.total_attempts, spr.correct_attempts
-    FROM student_problem_records spr
-    JOIN problems p ON spr.problem_id = p.id
-    WHERE spr.student_id = ? AND spr.next_review <= datetime('now', '+1 day')
-    ORDER BY spr.next_review ASC
-    LIMIT 20
-  `).all(req.studentId);
+router.get('/review-queue', authenticate, async (req, res) => {
+  try {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
 
-  res.json({ queue });
+    const { data: records } = await supabase
+      .from('student_problem_records')
+      .select('next_review, ease_factor, total_attempts, correct_attempts, problems!inner(id, grade, topic, difficulty, question_latex)')
+      .eq('student_id', req.studentId)
+      .lte('next_review', tomorrow.toISOString())
+      .order('next_review', { ascending: true })
+      .limit(20);
+
+    const queue = (records || []).map(r => ({
+      id: r.problems?.id,
+      grade: r.problems?.grade,
+      topic: r.problems?.topic,
+      difficulty: r.problems?.difficulty,
+      question_latex: r.problems?.question_latex,
+      next_review: r.next_review,
+      ease_factor: r.ease_factor,
+      total_attempts: r.total_attempts,
+      correct_attempts: r.correct_attempts
+    }));
+
+    res.json({ queue });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Generate AI feedback for a session
@@ -120,17 +187,18 @@ router.post('/feedback', authenticate, async (req, res) => {
   try {
     const { sessionId } = req.body;
 
-    const session = db.prepare('SELECT * FROM sessions WHERE id = ? AND student_id = ?')
-      .get(sessionId, req.studentId);
-    if (!session) return res.status(404).json({ error: '세션을 찾을 수 없습니다.' });
+    const [{ data: session }, { data: student }, weakTopics] = await Promise.all([
+      supabase.from('sessions').select('*').eq('id', sessionId).eq('student_id', req.studentId).single(),
+      supabase.from('students').select('grade_level').eq('id', req.studentId).single(),
+      getWeakTopics(req.studentId, 3)
+    ]);
 
-    const student = db.prepare('SELECT grade_level FROM students WHERE id = ?').get(req.studentId);
-    const weakTopics = getWeakTopics(req.studentId, 3);
+    if (!session) return res.status(404).json({ error: '세션을 찾을 수 없습니다.' });
 
     const feedback = await generateSessionFeedback({
       attempts: { total: session.problems_attempted, correct: session.problems_correct },
       weakTopics,
-      grade: student.grade_level
+      grade: student?.grade_level
     });
 
     res.json({ feedback });

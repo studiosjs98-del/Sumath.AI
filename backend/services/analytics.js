@@ -1,68 +1,77 @@
-const db = require('../database/db');
+const supabase = require('../database/supabase');
 
-/**
- * Get weak topics for a student (most errors)
- */
-function getWeakTopics(studentId, limit = 5) {
-  return db.prepare(`
-    SELECT mp.topic, mp.curriculum, mp.grade, mp.error_count, mp.last_error
-    FROM mistake_patterns mp
-    WHERE mp.student_id = ?
-    ORDER BY mp.error_count DESC
-    LIMIT ?
-  `).all(studentId, limit);
+async function getWeakTopics(studentId, limit = 5) {
+  const { data } = await supabase
+    .from('mistake_patterns')
+    .select('topic, curriculum, grade, error_count, last_error')
+    .eq('student_id', studentId)
+    .order('error_count', { ascending: false })
+    .limit(limit);
+  return data || [];
 }
 
-/**
- * Update mistake pattern for a student
- */
-function recordMistake(studentId, topic, curriculum, grade) {
-  db.prepare(`
-    INSERT INTO mistake_patterns (student_id, topic, curriculum, grade, error_count, last_error)
-    VALUES (?, ?, ?, ?, 1, datetime('now'))
-    ON CONFLICT(student_id, topic) DO UPDATE SET
-      error_count = error_count + 1,
-      last_error = datetime('now')
-  `).run(studentId, topic, curriculum, grade);
+async function recordMistake(studentId, topic, curriculum, grade) {
+  const { data: existing } = await supabase
+    .from('mistake_patterns')
+    .select('id, error_count')
+    .eq('student_id', studentId)
+    .eq('topic', topic)
+    .maybeSingle();
+
+  if (existing) {
+    await supabase
+      .from('mistake_patterns')
+      .update({ error_count: existing.error_count + 1, last_error: new Date().toISOString() })
+      .eq('id', existing.id);
+  } else {
+    await supabase.from('mistake_patterns').insert({
+      student_id: studentId, topic, curriculum, grade,
+      error_count: 1, last_error: new Date().toISOString()
+    });
+  }
 }
 
-/**
- * Get performance breakdown by grade/curriculum
- */
-function getPerformanceBreakdown(studentId) {
-  return db.prepare(`
-    SELECT
-      p.grade, p.curriculum, p.topic,
-      COUNT(*) as total_attempts,
-      SUM(CASE WHEN sa.quality >= 3 THEN 1 ELSE 0 END) as correct,
-      AVG(sa.quality) as avg_quality
-    FROM session_attempts sa
-    JOIN problems p ON sa.problem_id = p.id
-    WHERE sa.student_id = ?
-    GROUP BY p.grade, p.curriculum, p.topic
-    ORDER BY avg_quality ASC
-  `).all(studentId);
+async function getPerformanceBreakdown(studentId) {
+  const { data: attempts } = await supabase
+    .from('session_attempts')
+    .select('quality, problems!inner(grade, curriculum, topic)')
+    .eq('student_id', studentId);
+
+  const grouped = {};
+  for (const a of attempts || []) {
+    const p = a.problems;
+    if (!p) continue;
+    const key = `${p.grade}::${p.curriculum}::${p.topic}`;
+    if (!grouped[key]) grouped[key] = { grade: p.grade, curriculum: p.curriculum, topic: p.topic, total: 0, correct: 0, qualitySum: 0 };
+    grouped[key].total++;
+    if (a.quality >= 3) grouped[key].correct++;
+    grouped[key].qualitySum += a.quality;
+  }
+
+  return Object.values(grouped).map(g => ({
+    grade: g.grade, curriculum: g.curriculum, topic: g.topic,
+    total_attempts: g.total,
+    correct: g.correct,
+    avg_quality: g.total > 0 ? g.qualitySum / g.total : 0
+  })).sort((a, b) => a.avg_quality - b.avg_quality);
 }
 
-/**
- * Get recent session history
- */
-function getRecentSessions(studentId, limit = 10) {
-  return db.prepare(`
-    SELECT
-      s.id, s.started_at, s.ended_at,
-      s.problems_attempted, s.problems_correct, s.xp_earned,
-      ROUND(100.0 * s.problems_correct / NULLIF(s.problems_attempted, 0)) as accuracy
-    FROM sessions s
-    WHERE s.student_id = ?
-    ORDER BY s.started_at DESC
-    LIMIT ?
-  `).all(studentId, limit);
+async function getRecentSessions(studentId, limit = 10) {
+  const { data } = await supabase
+    .from('sessions')
+    .select('id, started_at, ended_at, problems_attempted, problems_correct, xp_earned')
+    .eq('student_id', studentId)
+    .order('started_at', { ascending: false })
+    .limit(limit);
+
+  return (data || []).map(s => ({
+    ...s,
+    accuracy: s.problems_attempted > 0
+      ? Math.round(100 * s.problems_correct / s.problems_attempted)
+      : null
+  }));
 }
 
-/**
- * Calculate XP reward for an attempt
- */
 function calculateXP(quality, difficulty, hintsUsed) {
   if (quality < 3) return 0;
   const base = quality === 5 ? 20 : 10;
@@ -71,16 +80,11 @@ function calculateXP(quality, difficulty, hintsUsed) {
   return Math.max(5, base + difficultyBonus - hintPenalty);
 }
 
-/**
- * Update student level and rank based on XP
- */
-function updateStudentRank(studentId) {
-  const student = db.prepare('SELECT xp FROM students WHERE id = ?').get(studentId);
+async function updateStudentRank(studentId) {
+  const { data: student } = await supabase.from('students').select('xp').eq('id', studentId).single();
   if (!student) return;
 
   const xp = student.xp;
-
-  // XP thresholds for ranks
   const ranks = [
     { rank: '9급', minXp: 0 },
     { rank: '8급', minXp: 100 },
@@ -101,59 +105,41 @@ function updateStudentRank(studentId) {
   let currentRank = '9급';
   let level = 1;
   for (let i = 0; i < ranks.length; i++) {
-    if (xp >= ranks[i].minXp) {
-      currentRank = ranks[i].rank;
-      level = i + 1;
-    }
+    if (xp >= ranks[i].minXp) { currentRank = ranks[i].rank; level = i + 1; }
   }
 
-  db.prepare('UPDATE students SET rank = ?, level = ? WHERE id = ?')
-    .run(currentRank, level, studentId);
-
+  await supabase.from('students').update({ rank: currentRank, level }).eq('id', studentId);
   return { rank: currentRank, level };
 }
 
-/**
- * Update streak
- */
-function updateStreak(studentId) {
-  const student = db.prepare('SELECT last_study_date, streak_days FROM students WHERE id = ?').get(studentId);
+async function updateStreak(studentId) {
+  const { data: student } = await supabase
+    .from('students')
+    .select('last_study_date, streak_days')
+    .eq('id', studentId)
+    .single();
   if (!student) return;
 
   const today = new Date().toISOString().split('T')[0];
   const lastDate = student.last_study_date;
-
   let newStreak = student.streak_days;
 
   if (!lastDate) {
     newStreak = 1;
   } else if (lastDate === today) {
-    // Already studied today, no change
     return { streak_days: newStreak };
   } else {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     const yesterdayStr = yesterday.toISOString().split('T')[0];
-
-    if (lastDate === yesterdayStr) {
-      newStreak += 1; // Consecutive day
-    } else {
-      newStreak = 1; // Streak broken
-    }
+    newStreak = lastDate === yesterdayStr ? newStreak + 1 : 1;
   }
 
-  db.prepare('UPDATE students SET streak_days = ?, last_study_date = ? WHERE id = ?')
-    .run(newStreak, today, studentId);
-
+  await supabase.from('students').update({ streak_days: newStreak, last_study_date: today }).eq('id', studentId);
   return { streak_days: newStreak };
 }
 
 module.exports = {
-  getWeakTopics,
-  recordMistake,
-  getPerformanceBreakdown,
-  getRecentSessions,
-  calculateXP,
-  updateStudentRank,
-  updateStreak
+  getWeakTopics, recordMistake, getPerformanceBreakdown, getRecentSessions,
+  calculateXP, updateStudentRank, updateStreak
 };

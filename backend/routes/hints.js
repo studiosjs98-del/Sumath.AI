@@ -1,6 +1,6 @@
 const express = require('express');
 const { getHint, analyzeSteps } = require('../services/aiTutor');
-const db = require('../database/db');
+const supabase = require('../database/supabase');
 const { authenticate } = require('./middleware');
 
 const router = express.Router();
@@ -10,7 +10,11 @@ router.post('/hint', authenticate, async (req, res) => {
   try {
     const { problemId, studentSteps, hintNumber, previousHints } = req.body;
 
-    const problem = db.prepare('SELECT * FROM problems WHERE id = ?').get(problemId);
+    const { data: problem } = await supabase
+      .from('problems')
+      .select('*')
+      .eq('id', problemId)
+      .single();
     if (!problem) return res.status(404).json({ error: '문제를 찾을 수 없습니다.' });
 
     const hint = await getHint({
@@ -34,12 +38,20 @@ router.post('/analyze', authenticate, async (req, res) => {
   try {
     const { problemId, studentSteps } = req.body;
 
-    const problem = db.prepare('SELECT * FROM problems WHERE id = ?').get(problemId);
+    const { data: problem } = await supabase
+      .from('problems')
+      .select('*')
+      .eq('id', problemId)
+      .single();
     if (!problem) return res.status(404).json({ error: '문제를 찾을 수 없습니다.' });
+
+    const steps = typeof problem.solution_steps === 'string'
+      ? JSON.parse(problem.solution_steps)
+      : problem.solution_steps;
 
     const analysis = await analyzeSteps({
       problemLatex: problem.question_latex,
-      correctSolutionSteps: JSON.parse(problem.solution_steps),
+      correctSolutionSteps: steps,
       studentSteps: studentSteps || [],
       topic: problem.topic,
       grade: problem.grade
@@ -53,11 +65,22 @@ router.post('/analyze', authenticate, async (req, res) => {
 });
 
 // Get pre-written hints (no AI, instant)
-router.get('/static/:problemId', authenticate, (req, res) => {
-  const problem = db.prepare('SELECT hints FROM problems WHERE id = ?').get(req.params.problemId);
-  if (!problem) return res.status(404).json({ error: '문제를 찾을 수 없습니다.' });
+router.get('/static/:problemId', authenticate, async (req, res) => {
+  try {
+    const { data: problem } = await supabase
+      .from('problems')
+      .select('hints')
+      .eq('id', req.params.problemId)
+      .single();
+    if (!problem) return res.status(404).json({ error: '문제를 찾을 수 없습니다.' });
 
-  res.json({ hints: JSON.parse(problem.hints || '[]') });
+    const hints = typeof problem.hints === 'string'
+      ? JSON.parse(problem.hints || '[]')
+      : (problem.hints || []);
+    res.json({ hints });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;
