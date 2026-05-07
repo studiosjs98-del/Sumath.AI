@@ -1,11 +1,11 @@
 const express = require('express')
 const multer = require('multer')
-const Groq = require('groq-sdk')
+const OpenAI = require('openai')
 const { authenticate } = require('./middleware')
 
 const router = express.Router()
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } })
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 const SYSTEM = `당신은 한국 수학 교육 전문가이자 AI 튜터입니다. 학생이 업로드한 수학 문제나 풀이 사진을 분석하고 도움을 드립니다.
 
@@ -35,8 +35,8 @@ router.post('/analyze', authenticate, upload.single('image'), async (req, res) =
 
   try {
     const base64 = req.file.buffer.toString('base64')
-    const response = await groq.chat.completions.create({
-      model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
       max_tokens: 2048,
       messages: [
         { role: 'system', content: SYSTEM },

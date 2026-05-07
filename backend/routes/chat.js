@@ -1,9 +1,9 @@
 const express = require('express')
-const Groq = require('groq-sdk')
+const OpenAI = require('openai')
 const { authenticate } = require('./middleware')
 
 const router = express.Router()
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 const SYSTEM = `당신은 "수학이", 대한민국 최고의 AI 수학 튜터입니다. 중학교부터 수능, 대학 수학까지 모든 수학을 완벽히 가르칩니다.
 
@@ -42,8 +42,8 @@ router.post('/message', authenticate, async (req, res) => {
   }
 
   try {
-    const response = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
       max_tokens: 2048,
       messages: [
         { role: 'system', content: SYSTEM },
@@ -61,8 +61,8 @@ router.post('/message', authenticate, async (req, res) => {
 router.post('/demo', async (req, res) => {
   const problem = req.body.problem || '$\\sqrt{16} + \\sqrt{25}$의 값을 구하시오.'
   try {
-    const response = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
       max_tokens: 512,
       messages: [
         { role: 'system', content: SYSTEM },

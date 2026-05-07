@@ -4,9 +4,9 @@
  * Falls back to rule-based generation if AI is unavailable.
  */
 
-const Groq = require('groq-sdk')
+const OpenAI = require('openai')
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 // Seeded shuffle — keeps option order stable for the same problem
 function seededRand(seed) {
@@ -58,8 +58,8 @@ Rules:
 Return ONLY a valid JSON array of exactly 3 strings. No explanation, no markdown, no extra text.
 Example: ["$(x-5)(x+3)$", "$(x+5)(x+3)$", "$(x-5)(x-3)$"]`
 
- const response = await groq.chat.completions.create({
-  model: 'llama-3.3-70b-versatile',
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
     max_tokens: 300,
     messages: [{ role: 'user', content: prompt }]
   })
