@@ -266,18 +266,21 @@ function buildOaiMessages(systemPrompt, messages) {
 async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini') {
   const oaiMessages = buildOaiMessages(systemPrompt, messages);
 
-  const stream = await openai.chat.completions.create({
-    model,
-    max_tokens: 8000,
-    temperature: 0.1,
-    stream: true,
-    messages: oaiMessages,
-  });
+  const stream = await openai.chat.completions.create(
+    {
+      model,
+      max_tokens: 8000,
+      temperature: 0.1,
+      stream: true,
+      messages: oaiMessages,
+    },
+    { timeout: 120000 }
+  );
 
   // Keep-alive comments prevent proxy/client timeouts during slow streaming.
   let keepAliveTimer = setInterval(() => {
-    try { res.write(': keep-alive\n\n') } catch (_) { clearInterval(keepAliveTimer) }
-  }, 8000);
+    try { res.write(': keepalive\n\n') } catch (_) { clearInterval(keepAliveTimer) }
+  }, 15000);
 
   try {
     for await (const chunk of stream) {
@@ -326,6 +329,15 @@ async function callO3Mini(systemPrompt, messages, res) {
 
 // ── Main route ───────────────────────────────────────────────────────────────
 router.post('/message', async (req, res) => {
+  // Route-level keep-alive — fires every 15s for the whole request lifetime so
+  // the non-streaming o3-mini path (which sits silent on OpenAI for 30-90s)
+  // doesn't get its SSE connection reaped by Render/proxy idle timeouts.
+  // streamOpenAI also runs its own keep-alive while it's active; the two are
+  // additive and harmless.
+  const keepAlive = setInterval(() => {
+    try { res.write(': keepalive\n\n') } catch (_) { clearInterval(keepAlive) }
+  }, 15000);
+
   try {
     const { messages, grade, weakTopics, language } = req.body;
     const langInstruction = getLanguageInstruction(language);
@@ -365,6 +377,8 @@ router.post('/message', async (req, res) => {
       res.write(`data: ${JSON.stringify({ error: 'AI 응답 생성 중 오류가 발생했습니다.' })}\n\n`);
       res.end();
     }
+  } finally {
+    clearInterval(keepAlive);
   }
 });
 
