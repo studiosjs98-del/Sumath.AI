@@ -245,7 +245,7 @@ async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini') 
     {
       model,
       max_tokens: 8000,
-      temperature: 0.1,
+      temperature: 0.4,
       stream: true,
       messages: oaiMessages,
     },
@@ -346,12 +346,12 @@ router.post('/message', async (req, res) => {
     const lastText = extractMathQuery(messages) || '';
     const hard = isHardQuestion(lastText, hasImage);
     // Routing:
-    //   image attached       → gpt-4o       (vision-capable, smarter than 4o-mini)
-    //   hard text-only       → o3-mini      (reasoning), with fallback to 4o-mini
-    //   everything else      → gpt-4o-mini  (fast streaming)
-    const modelName = hasImage ? 'gpt-4o' : (hard ? 'o3-mini' : 'gpt-4o-mini');
+    //   image attached       → gpt-4o    (vision-capable, follows depth prompt)
+    //   hard text-only       → o3-mini   (reasoning), fallback to gpt-4o on error
+    //   everything else      → gpt-4o    (gpt-4o-mini ignored the depth prompt)
+    const modelName = hasImage ? 'gpt-4o' : (hard ? 'o3-mini' : 'gpt-4o');
 
-    console.log('[model-router] using:', modelName, 'for message length:', lastText.length, 'image:', hasImage);
+    console.log('[model-router] using:', modelName, 'for message length:', lastText.length, 'image:', hasImage, 'hard:', hard);
 
     const basePrompt = buildSystemPrompt(grade, weakTopics);
     const systemPrompt = langInstruction + '\n\n' + basePrompt;
@@ -362,11 +362,11 @@ router.post('/message', async (req, res) => {
       try {
         await callO3Mini(systemPrompt, messages, res);
       } catch (o3Err) {
-        console.warn('[model-router] o3-mini failed, falling back to gpt-4o-mini:', o3Err.message || o3Err);
-        await streamOpenAI(systemPrompt, messages, res, 'gpt-4o-mini');
+        console.warn('[model-router] o3-mini failed, falling back to gpt-4o:', o3Err.message || o3Err);
+        await streamOpenAI(systemPrompt, messages, res, 'gpt-4o');
       }
     } else {
-      await streamOpenAI(systemPrompt, messages, res, 'gpt-4o-mini');
+      await streamOpenAI(systemPrompt, messages, res, 'gpt-4o');
     }
 
     res.write('data: [DONE]\n\n');
