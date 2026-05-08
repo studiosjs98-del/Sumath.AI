@@ -1,10 +1,9 @@
 const express = require('express')
-const OpenAI = require('openai')
+const openai = require('../services/openaiClient')
 const supabase = require('../database/supabase')
 const { authenticate } = require('./middleware')
 
 const router = express.Router()
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 function extractJson(text) {
   if (!text || typeof text !== 'string') return null

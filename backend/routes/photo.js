@@ -1,11 +1,10 @@
 const express = require('express')
 const multer = require('multer')
-const OpenAI = require('openai')
+const openai = require('../services/openaiClient')
 const { authenticate } = require('./middleware')
 
 const router = express.Router()
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } })
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 const SYSTEM = `당신은 한국 수학 교육 전문가이자 AI 튜터입니다. 학생이 업로드한 수학 문제나 풀이 사진을 분석하고 도움을 드립니다.
 

@@ -1,6 +1,4 @@
-const OpenAI = require('openai');
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = require('./openaiClient');
 
 const SYSTEM_PROMPT = `너는 한국 최고의 수학 AI 튜터 '수학이'야. 무조건 한국어로만 답해. 모든 수식은 LaTeX로 작성해. 선생님이 옆에서 가르쳐주는 느낌으로, 따뜻하고 격려하는 톤을 유지해. 절대로 영어로 설명하지 마.`;
 

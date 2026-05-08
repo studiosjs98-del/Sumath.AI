@@ -1,9 +1,8 @@
 const express = require('express')
-const OpenAI = require('openai')
+const openai = require('../services/openaiClient')
 const { authenticate } = require('./middleware')
 
 const router = express.Router()
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 const SYSTEM = `당신은 "수학이", 대한민국 최고의 AI 수학 튜터입니다. 중학교부터 수능, 대학 수학까지 모든 수학을 완벽히 가르칩니다.
 

@@ -1,13 +1,11 @@
 const express = require('express');
-const OpenAI = require('openai');
-const Anthropic = require('@anthropic-ai/sdk');
+const openai = require('../services/openaiClient');
+const anthropic = require('../services/anthropicClient');
 const { authenticate } = require('./middleware');
 const supabase = require('../database/supabase');
 const { getLanguageInstruction } = require('../utils/language');
 
 const router = express.Router();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 function extractJson(text) {
   if (!text || typeof text !== 'string') return null;

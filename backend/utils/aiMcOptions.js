@@ -4,9 +4,7 @@
  * Falls back to rule-based generation if AI is unavailable.
  */
 
-const OpenAI = require('openai')
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+const openai = require('../services/openaiClient')
 
 // Seeded shuffle — keeps option order stable for the same problem
 function seededRand(seed) {

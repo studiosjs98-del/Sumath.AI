@@ -2,36 +2,27 @@
 /**
  * rebuildDatabase.js
  *
- * Generates 100 high-quality Korean math questions per subcategory
- * using Anthropic Claude API and inserts them into the SQLite database.
+ * Generates Korean math questions per subcategory using the OpenAI API
+ * and inserts them into the Supabase `problems` table.
  *
  * Usage: node backend/scripts/rebuildDatabase.js [--grade=중1] [--topic=소인수분해] [--force]
- *
- * Options:
- *   --grade=X    Only process a specific grade
- *   --topic=X    Only process a specific topic
- *   --force      Overwrite existing questions for topics that already have 100+
  */
 
 'use strict'
 
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') })
 
-const path = require('path')
-const Groq = require('groq-sdk')
-const Database = require('better-sqlite3')
+const openai = require('../services/openaiClient')
+const supabase = require('../database/supabase')
 const CURRICULUM = require('../database/curriculum')
 
-// ── Config ──────────────────────────────────────────────────────────────────
-const DB_PATH = path.join(__dirname, '../../data/sumath.db')
-const MODEL = 'llama-3.3-70b-versatile'
+const MODEL = 'gpt-4o-mini'
 const TARGET_PER_TOPIC = 100
-const BASIC_COUNT = 33    // difficulty 1-2
-const MEDIUM_COUNT = 34   // difficulty 3
-const HARD_COUNT = 33     // difficulty 4-5
-const DELAY_MS = 500      // between subcategory batches
+const BASIC_COUNT = 33
+const MEDIUM_COUNT = 34
+const HARD_COUNT = 33
+const DELAY_MS = 500
 
-// ── CLI Arg Parsing ──────────────────────────────────────────────────────────
 const args = process.argv.slice(2)
 const getArg = (name) => {
   const match = args.find(a => a.startsWith(`--${name}=`))
@@ -41,7 +32,6 @@ const gradeFilter = getArg('grade')
 const topicFilter = getArg('topic')
 const forceMode = args.includes('--force')
 
-// ── Seeded Shuffle ────────────────────────────────────────────────────────────
 function seededRand(seed) {
   let s = seed
   return () => {
@@ -60,7 +50,6 @@ function shuffleWithSeed(arr, seed) {
   return a
 }
 
-// ── Build mc_options from answer + wrong_answers ──────────────────────────────
 function buildMcOptions(answerLatex, wrongAnswers, seed) {
   const allOptions = [answerLatex, ...wrongAnswers.slice(0, 3)]
   const shuffled = shuffleWithSeed(allOptions, seed)
@@ -68,7 +57,6 @@ function buildMcOptions(answerLatex, wrongAnswers, seed) {
   return { options: shuffled, correctIndex }
 }
 
-// ── Prompt Builder ────────────────────────────────────────────────────────────
 function buildPrompt(grade, curriculum, topic, difficulty, count) {
   let diffLabel, diffDesc, diffValue
   if (difficulty === 'basic') {
@@ -123,11 +111,8 @@ ${diffDesc}
 
 ## 품질 규칙
 1. **모든 텍스트는 한국어**로 작성
-2. **수식은 반드시 $...$ 형식**의 LaTeX 사용 (인라인: $x^2$, 블록: $$x^2+y^2=r^2$$)
-3. **wrong_answers(오답)**는 정답과 **같은 형식**이어야 함:
-   - 정답이 $x = 3$이면 오답도 $x = 1$, $x = -2$ 등 같은 형태
-   - 정답이 인수분해 $(x+2)(x-3)$이면 오답도 인수분해 형태
-   - 일반적인 오류 패턴(부호 실수, 계산 실수)을 반영한 그럴듯한 오답
+2. **수식은 반드시 $...$ 형식**의 LaTeX 사용
+3. **wrong_answers(오답)**는 정답과 **같은 형식**이어야 함
 4. **문제 중복 금지**: ${count}개의 문제가 모두 서로 다른 수치/상황을 다뤄야 함
 5. **solution_steps**: 최소 3단계, 각 단계는 명확하고 교육적으로 설명
 6. **hints**: 3개, 점진적으로 더 많은 정보 제공
@@ -137,20 +122,19 @@ ${diffDesc}
 JSON 배열만 출력하세요. 다른 텍스트 없이.`
 }
 
-// ── Groq API Call ─────────────────────────────────────────────────────────────
-async function generateProblems(groq, grade, curriculum, topic, difficulty, count) {
+async function generateProblems(grade, curriculum, topic, difficulty, count) {
   const prompt = buildPrompt(grade, curriculum, topic, difficulty, count)
 
-  const completion = await groq.chat.completions.create({
+  const completion = await openai.chat.completions.create({
     model: MODEL,
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.7,
-    max_tokens: 32768,
+    max_tokens: 8000,
+    response_format: { type: 'json_object' },
   })
 
   const rawText = completion.choices[0]?.message?.content?.trim() ?? ''
 
-  // Strip markdown code fences if model wraps the JSON
   let jsonText = rawText
   const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fenceMatch) {
@@ -160,7 +144,6 @@ async function generateProblems(groq, grade, curriculum, topic, difficulty, coun
     if (arrayMatch) jsonText = arrayMatch[0]
   }
 
-  // Fix unescaped backslashes from LaTeX (e.g. \cdot → \\cdot)
   jsonText = jsonText.replace(/\\(?![\\/"nrtbfu])/g, '\\\\')
 
   let parsed
@@ -170,12 +153,14 @@ async function generateProblems(groq, grade, curriculum, topic, difficulty, coun
     throw new Error(`JSON parse failed: ${err.message}\nRaw (first 500 chars): ${rawText.slice(0, 500)}`)
   }
 
-  if (!Array.isArray(parsed)) throw new Error('Response is not an array')
-  return parsed
+  // response_format json_object returns an object — accept both shapes
+  if (Array.isArray(parsed)) return parsed
+  if (Array.isArray(parsed?.problems)) return parsed.problems
+  if (Array.isArray(parsed?.questions)) return parsed.questions
+  throw new Error('Response is not an array or recognized object shape')
 }
 
-// ── Insert Problem into DB ────────────────────────────────────────────────────
-function insertProblem(db, insertStmt, grade, curriculum, topic, question, seed) {
+function buildRow(grade, curriculum, topic, question, seed) {
   const {
     question_latex,
     answer_latex,
@@ -191,44 +176,59 @@ function insertProblem(db, insertStmt, grade, curriculum, topic, question, seed)
 
   const mcData = buildMcOptions(answer_latex, wrong_answers, seed)
 
-  insertStmt.run(
+  return {
     grade,
     curriculum,
-    topic,   // unit = topic
+    unit: topic,
     topic,
-    typeof difficulty === 'number' ? difficulty : 3,
+    difficulty: typeof difficulty === 'number' ? difficulty : 3,
     question_latex,
     answer_latex,
-    JSON.stringify(Array.isArray(solution_steps) ? solution_steps : []),
-    JSON.stringify(Array.isArray(hints) ? hints : []),
-    JSON.stringify([]),         // tags
-    JSON.stringify(mcData)
-  )
+    solution_steps: JSON.stringify(Array.isArray(solution_steps) ? solution_steps : []),
+    hints: JSON.stringify(Array.isArray(hints) ? hints : []),
+    tags: JSON.stringify([]),
+    mc_options: JSON.stringify(mcData),
+  }
 }
 
-// ── Process One Subcategory ───────────────────────────────────────────────────
-async function processSubcategory(db, groq, insertStmt, entry, stats) {
+async function processSubcategory(entry, stats) {
   const { grade, curriculum, topic } = entry
   const label = `[${grade}/${topic}]`
 
-  const existing = db.prepare(
-    'SELECT COUNT(*) as cnt FROM problems WHERE grade = ? AND topic = ?'
-  ).get(grade, topic)
-  const existingCount = existing ? existing.cnt : 0
+  const { count: existingCount, error: countErr } = await supabase
+    .from('problems')
+    .select('*', { count: 'exact', head: true })
+    .eq('grade', grade)
+    .eq('topic', topic)
 
-  if (existingCount >= TARGET_PER_TOPIC && !forceMode) {
-    console.log(`⚠️  ${label} 건너뜀 — 이미 ${existingCount}문제 존재`)
+  if (countErr) {
+    console.error(`❌ ${label} count failed: ${countErr.message}`)
+    stats.failed++
+    return
+  }
+
+  const existing = existingCount || 0
+
+  if (existing >= TARGET_PER_TOPIC && !forceMode) {
+    console.log(`⚠️  ${label} 건너뜀 — 이미 ${existing}문제 존재`)
     stats.skipped++
     return
   }
 
-  console.log(`\n🚀 ${label} 생성 시작... (기존: ${existingCount}문제)`)
+  console.log(`\n🚀 ${label} 생성 시작... (기존: ${existing}문제)`)
 
-  if (forceMode && existingCount > 0) {
-    db.pragma('foreign_keys = OFF')
-    db.prepare('DELETE FROM problems WHERE grade = ? AND topic = ?').run(grade, topic)
-    db.pragma('foreign_keys = ON')
-    console.log(`   기존 ${existingCount}문제 삭제 완료`)
+  if (forceMode && existing > 0) {
+    const { error: delErr } = await supabase
+      .from('problems')
+      .delete()
+      .eq('grade', grade)
+      .eq('topic', topic)
+    if (delErr) {
+      console.error(`   ❌ 기존 문제 삭제 실패: ${delErr.message}`)
+      stats.failed++
+      return
+    }
+    console.log(`   기존 ${existing}문제 삭제 완료`)
   }
 
   const tiers = [
@@ -243,19 +243,26 @@ async function processSubcategory(db, groq, insertStmt, entry, stats) {
   for (const tier of tiers) {
     try {
       console.log(`   ⏳ ${tier.label} ${tier.count}문제 생성 중...`)
-      const problems = await generateProblems(groq, grade, curriculum, topic, tier.key, tier.count)
+      const problems = await generateProblems(grade, curriculum, topic, tier.key, tier.count)
 
-      let insertedThisTier = 0
+      const rows = []
       for (const p of problems) {
         try {
-          insertProblem(db, insertStmt, grade, curriculum, topic, p, seedBase++)
-          insertedThisTier++
-          totalInserted++
+          rows.push(buildRow(grade, curriculum, topic, p, seedBase++))
         } catch (rowErr) {
-          console.warn(`     ⚠️  문제 삽입 오류: ${rowErr.message}`)
+          console.warn(`     ⚠️  문제 변환 오류: ${rowErr.message}`)
         }
       }
-      console.log(`   ✅ ${tier.label} ${insertedThisTier}/${tier.count} 삽입 완료`)
+
+      if (rows.length) {
+        const { error: insErr } = await supabase.from('problems').insert(rows)
+        if (insErr) {
+          console.error(`     ❌ 삽입 실패: ${insErr.message}`)
+        } else {
+          totalInserted += rows.length
+        }
+      }
+      console.log(`   ✅ ${tier.label} ${rows.length}/${tier.count} 삽입 완료`)
     } catch (tierErr) {
       console.error(`   ❌ ${tier.label} 생성 실패: ${tierErr.message}`)
       stats.failed++
@@ -266,12 +273,10 @@ async function processSubcategory(db, groq, insertStmt, entry, stats) {
   stats.generated += totalInserted
 }
 
-// ── Sleep Helper ──────────────────────────────────────────────────────────────
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-// ── Summary Table ─────────────────────────────────────────────────────────────
 function printSummary(stats, elapsed) {
   const sec = (elapsed / 1000).toFixed(1)
   const min = (elapsed / 60000).toFixed(1)
@@ -285,39 +290,18 @@ function printSummary(stats, elapsed) {
   console.log('═'.repeat(56))
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
   const startTime = Date.now()
 
-  if (!process.env.GROQ_API_KEY) {
-    console.error('❌ GROQ_API_KEY 환경변수가 설정되지 않았습니다.')
-    console.error('   .env 파일에 GROQ_API_KEY=your_key_here 를 추가하세요.')
+  if (!process.env.OPENAI_API_KEY) {
+    console.error('❌ OPENAI_API_KEY 환경변수가 설정되지 않았습니다.')
+    process.exit(1)
+  }
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.error('❌ SUPABASE_URL 또는 SUPABASE_SERVICE_ROLE_KEY 환경변수가 설정되지 않았습니다.')
     process.exit(1)
   }
 
-  // Connect to DB
-  const db = new Database(DB_PATH)
-  db.pragma('journal_mode = WAL')
-  db.pragma('synchronous = NORMAL')
-
-  // Ensure mc_options column exists
-  const tableInfo = db.prepare('PRAGMA table_info(problems)').all()
-  if (!tableInfo.some(c => c.name === 'mc_options')) {
-    db.prepare('ALTER TABLE problems ADD COLUMN mc_options TEXT').run()
-    console.log('   mc_options 컬럼 추가됨')
-  }
-
-  const insertStmt = db.prepare(`
-    INSERT INTO problems
-      (grade, curriculum, unit, topic, difficulty, question_latex, answer_latex,
-       solution_steps, hints, tags, mc_options)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `)
-
-  // Init Groq client
-  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
-
-  // Filter curriculum
   let targets = CURRICULUM
   if (gradeFilter) {
     targets = targets.filter(e => e.grade === gradeFilter)
@@ -329,7 +313,7 @@ async function main() {
   }
 
   console.log('═'.repeat(56))
-  console.log('  수학 문제 데이터베이스 재구축 (Groq)')
+  console.log('  수학 문제 데이터베이스 재구축 (OpenAI + Supabase)')
   console.log(`  모델: ${MODEL}`)
   console.log(`  대상: ${targets.length}개 단원 × ${TARGET_PER_TOPIC}문제`)
   if (gradeFilter) console.log(`  학년 필터: ${gradeFilter}`)
@@ -340,11 +324,10 @@ async function main() {
   const stats = { generated: 0, skipped: 0, failed: 0 }
 
   for (let i = 0; i < targets.length; i++) {
-    await processSubcategory(db, groq, insertStmt, targets[i], stats)
+    await processSubcategory(targets[i], stats)
     if (i < targets.length - 1) await sleep(DELAY_MS)
   }
 
-  db.close()
   printSummary(stats, Date.now() - startTime)
 }
 
