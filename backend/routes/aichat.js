@@ -292,10 +292,20 @@ async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini') 
   }
 }
 
-// Hard-question signals: returns true if the question warrants o3-mini
+// Hard-question signals: returns true only if the question is text-only AND
+// substantial enough to warrant o3-mini's reasoning (which doesn't support
+// vision). Image questions are routed elsewhere — never to o3-mini.
 function isHardQuestion(lastText, hasImage) {
-  if (hasImage) return true;
+  if (hasImage) return false;
+  if (!lastText) return false;
+
+  // Length-only trigger for clearly long questions.
   if (lastText.length > 200) return true;
+
+  // Keyword trigger requires a minimum length so that tiny conversational
+  // messages that happen to contain "log", "ln", etc. don't get routed to
+  // o3-mini. Picked 30 chars — roughly one sentence in Korean.
+  if (lastText.length < 30) return false;
 
   const keywords = [
     '적분', '미분', '로그', '증명', '극한', '수열', '급수', '행렬', '벡터', '확률',
@@ -353,15 +363,26 @@ router.post('/message', async (req, res) => {
     const hasImage = messages.some(m => m.imageBase64);
     const lastText = extractMathQuery(messages) || '';
     const hard = isHardQuestion(lastText, hasImage);
-    const modelName = hard ? 'o3-mini' : 'gpt-4o-mini';
+    // Routing:
+    //   image attached       → gpt-4o       (vision-capable, smarter than 4o-mini)
+    //   hard text-only       → o3-mini      (reasoning), with fallback to 4o-mini
+    //   everything else      → gpt-4o-mini  (fast streaming)
+    const modelName = hasImage ? 'gpt-4o' : (hard ? 'o3-mini' : 'gpt-4o-mini');
 
-    console.log('[model-router] using:', modelName, 'for message length:', lastText.length);
+    console.log('[model-router] using:', modelName, 'for message length:', lastText.length, 'image:', hasImage);
 
     const basePrompt = buildSystemPrompt(grade, weakTopics);
     const systemPrompt = langInstruction + '\n\n' + basePrompt;
 
-    if (hard) {
-      await callO3Mini(systemPrompt, messages, res);
+    if (hasImage) {
+      await streamOpenAI(systemPrompt, messages, res, 'gpt-4o');
+    } else if (hard) {
+      try {
+        await callO3Mini(systemPrompt, messages, res);
+      } catch (o3Err) {
+        console.warn('[model-router] o3-mini failed, falling back to gpt-4o-mini:', o3Err.message || o3Err);
+        await streamOpenAI(systemPrompt, messages, res, 'gpt-4o-mini');
+      }
     } else {
       await streamOpenAI(systemPrompt, messages, res, 'gpt-4o-mini');
     }
