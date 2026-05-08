@@ -22,7 +22,7 @@ function MathContent({ children, inline }) {
   if (!children) return null
   const Wrapper = inline ? 'span' : 'div'
   return (
-    <Wrapper style={{ fontSize: 15, color: '#1f2937', margin: 0, padding: 0, lineHeight: 1.8 }}>
+    <Wrapper style={{ fontSize: 15, color: '#1f2937', margin: 0, padding: 0, lineHeight: 1.5 }}>
       <MathText text={String(children)} />
     </Wrapper>
   )
@@ -240,13 +240,13 @@ function HighlightSection({ label, children, borderColor, background, labelColor
       borderLeft: `3px solid ${borderColor}`,
       background,
       borderRadius: '0 4px 4px 0',
-      padding: '12px 16px',
-      marginTop: 14,
-      marginBottom: 14,
+      padding: '8px 14px',
+      marginTop: 8,
+      marginBottom: 8,
     }}>
       <div style={{
         fontSize: 10, fontWeight: 700, color: labelColor,
-        textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8,
+        textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4,
       }}>{label}</div>
       {children}
     </div>
@@ -260,14 +260,14 @@ function FinalAnswer({ value }) {
   // Strip outer $ if present — MathText handles rendering
   const cleanValue = value.replace(/^\$/, '').replace(/\$$/, '').replace(/\\[,;!]/g, ' ').trim()
   return (
-    <div style={{ margin: '24px 0 12px' }}>
+    <div style={{ margin: '12px 0 6px' }}>
       <div style={{
         background: '#eff6ff',
         borderLeft: '3px solid #2563eb',
         borderRadius: 4,
-        padding: '12px 16px',
+        padding: '8px 14px',
       }}>
-        <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: '#2563eb' }}>{label}</span>
           <span style={{ fontSize: 13, color: '#2563eb', fontWeight: 700 }}>∴</span>
         </div>
@@ -292,13 +292,13 @@ function extractMultipleAnswers(text) {
 
 function MultipleAnswers({ answers }) {
   return (
-    <div style={{ margin: '20px 0', display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div style={{ margin: '10px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
       {answers.map((a, i) => (
         <div key={i} style={{
           display: 'flex',
           alignItems: 'center',
           gap: 12,
-          padding: '10px 16px',
+          padding: '6px 14px',
           background: '#eff6ff',
           borderLeft: '3px solid #2563eb',
           borderRadius: 4,
@@ -328,7 +328,7 @@ function SingleSolution({ text }) {
   const firstStepBi = blocks.findIndex(b => b.type === 'step')
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       {blocks.map((block, bi) => {
         switch (block.type) {
 
@@ -343,8 +343,8 @@ function SingleSolution({ text }) {
           case 'step': {
             stepCounter++
             return (
-              <div key={bi} style={{ marginTop: 20, marginBottom: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <div key={bi} style={{ marginTop: 10, marginBottom: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
                   <span style={{
                     minWidth: 26, height: 26, borderRadius: 13, flexShrink: 0,
                     background: '#2563EB', color: '#fff',
@@ -358,9 +358,9 @@ function SingleSolution({ text }) {
                     }
                   </span>
                 </div>
-                <div style={{ height: 1, background: '#f0f0f0', marginBottom: 10 }} />
+                <div style={{ height: 1, background: '#f0f0f0', marginBottom: 6 }} />
                 {block.content && (
-                  <div style={{ paddingLeft: 36, fontSize: 15, lineHeight: 1.9 }}>
+                  <div style={{ paddingLeft: 36, fontSize: 15, lineHeight: 1.55 }}>
                     <MathContent>{block.content}</MathContent>
                   </div>
                 )}
@@ -375,9 +375,9 @@ function SingleSolution({ text }) {
             const lines = (block.content || '').split('\n').map(l => l.trim()).filter(l => l && l !== '∴' && l !== '.')
             if (!lines.length) return null
             return (
-              <div key={bi} style={{ marginTop: 16, marginBottom: 4 }}>
+              <div key={bi} style={{ marginTop: 8, marginBottom: 2 }}>
                 {lines.map((line, j) => (
-                  <div key={j} style={{ fontSize: 16, lineHeight: 1.9, color: '#1F2937', display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                  <div key={j} style={{ fontSize: 16, lineHeight: 1.55, color: '#1F2937', display: 'flex', alignItems: 'baseline', gap: 6 }}>
                     <span style={{ fontWeight: 700, color: '#374151', flexShrink: 0 }}>∴</span>
                     <MathContent inline>{line}</MathContent>
                   </div>
@@ -403,7 +403,7 @@ function SingleSolution({ text }) {
 
           case 'key_transform':
             return (
-              <div key={bi} style={{ marginBottom: 12, padding: '8px 0', fontSize: 14, color: '#374151' }}>
+              <div key={bi} style={{ marginBottom: 6, padding: '4px 0', fontSize: 14, color: '#374151' }}>
                 <MathContent>{block.content}</MathContent>
               </div>
             )
@@ -418,9 +418,9 @@ function SingleSolution({ text }) {
           case 'one_liner':
             return (
               <div key={bi} style={{
-                marginTop: 16, paddingTop: 12,
+                marginTop: 8, paddingTop: 6,
                 borderTop: '1px solid #e5e7eb',
-                fontSize: 13, color: '#9ca3af', lineHeight: 1.7,
+                fontSize: 13, color: '#9ca3af', lineHeight: 1.5,
               }}>
                 <MathContent inline>{block.content}</MathContent>
               </div>
@@ -429,8 +429,8 @@ function SingleSolution({ text }) {
           case 'closing_question':
             return (
               <div key={bi} style={{
-                marginTop: 22, paddingTop: 14, borderTop: '1px solid #e5e7eb',
-                fontSize: 14, color: '#9ca3af', lineHeight: 1.7,
+                marginTop: 10, paddingTop: 6, borderTop: '1px solid #e5e7eb',
+                fontSize: 14, color: '#9ca3af', lineHeight: 1.5,
               }}>
                 <MathContent inline>{block.content}</MathContent>
               </div>
@@ -461,18 +461,18 @@ function SolutionBlocks({ text }) {
   const sections = parseMultipleSolutions(text)
   if (sections && sections.length > 1) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {sections.map((section, i) => (
           <div key={i} style={{
             border: '1px solid #e5e7eb',
             borderRadius: 12,
-            padding: '16px 20px',
+            padding: '10px 16px',
           }}>
             <div style={{
               fontSize: 12,
               fontWeight: 600,
               color: '#6b7280',
-              marginBottom: 12,
+              marginBottom: 6,
               textTransform: 'uppercase',
               letterSpacing: '0.05em',
             }}>

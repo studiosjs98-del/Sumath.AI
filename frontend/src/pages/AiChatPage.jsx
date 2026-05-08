@@ -51,7 +51,7 @@ const STYLES = `
 }
 .chat-messages {
   flex: 1; min-height: 0;
-  overflow-y: auto; padding: 20px;
+  overflow-y: auto; padding: 12px 20px;
   background: #ffffff;
 }
 
@@ -1949,7 +1949,7 @@ export default function AiChatPage() {
                     const { clean: clean1, graphs, diagrams } = extractGraphs(msg.content)
                     const { main, followUp } = extractFollowUp(clean1)
                     return (
-                      <div key={i} className={isFading ? 'rendered-bubble-reveal' : ''} style={{ marginBottom: 20 }}>
+                      <div key={i} className={isFading ? 'rendered-bubble-reveal' : ''} style={{ marginBottom: 10 }}>
                         <div className="chat-msg" style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                           <div style={{
                             width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
@@ -1958,9 +1958,9 @@ export default function AiChatPage() {
                           }}>
                             <span style={{ fontSize: 16, fontWeight: 700, color: '#fff', fontFamily: 'serif', lineHeight: 1 }}>Σ</span>
                           </div>
-                          <div style={{ maxWidth: 820, flex: 1, fontSize: 16, lineHeight: 1.8, position: 'relative' }}>
+                          <div style={{ maxWidth: 820, flex: 1, fontSize: 16, lineHeight: 1.5, position: 'relative' }}>
                             {diagrams.map((d, di) => (
-                              <div key={di} style={{ margin: '16px 0', textAlign: 'center' }}>
+                              <div key={di} style={{ margin: '8px 0', textAlign: 'center' }}>
                                 <div dangerouslySetInnerHTML={{ __html: d.svg }} style={{ display: 'inline-block', maxWidth: '100%', borderRadius: 12, overflow: 'hidden' }} />
                                 {d.caption && <div style={{ fontSize: 12, color: '#6B7280', marginTop: 6 }}>{d.caption}</div>}
                               </div>
@@ -1974,7 +1974,7 @@ export default function AiChatPage() {
                                 ? <PointsGraph key={gi} points={g.points} titleHtml={g.title ? renderInline(g.title) : undefined} type={g.type} />
                                 : <FunctionGraph key={gi} func={g.func} xMin={g.xMin ?? -5} xMax={g.xMax ?? 5} label={g.label} />
                             ))}
-                            <div style={{ display: 'flex', alignItems: 'center', marginTop: 14, marginBottom: 4 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', marginTop: 8, marginBottom: 2 }}>
                               {liveWeakTopics.length > 0 && (
                                 <>
                                   <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#aaa', letterSpacing: '0.06em', textTransform: 'uppercase' }}>분석</span>
@@ -1998,13 +1998,13 @@ export default function AiChatPage() {
                           </div>
                         </div>
                         {followUp && (
-                          <div className="chat-msg" style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 8, paddingLeft: 42 }}>
+                          <div className="chat-msg" style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 4, paddingLeft: 42 }}>
                             <div style={{
                               maxWidth: '84%', background: '#EFF6FF', border: '1.5px solid #93C5FD',
-                              borderRadius: '8px 18px 18px 8px', padding: '12px 16px',
-                              fontSize: 14, lineHeight: 1.6, color: '#1E40AF', fontStyle: 'italic'
+                              borderRadius: '8px 18px 18px 8px', padding: '8px 12px',
+                              fontSize: 14, lineHeight: 1.5, color: '#1E40AF', fontStyle: 'italic'
                             }}>
-                              <div style={{ fontSize: 10, fontWeight: 800, color: '#2563EB', letterSpacing: 0.8, marginBottom: 5, fontStyle: 'normal', textTransform: 'uppercase' }}>
+                              <div style={{ fontSize: 10, fontWeight: 800, color: '#2563EB', letterSpacing: 0.8, marginBottom: 3, fontStyle: 'normal', textTransform: 'uppercase' }}>
                                 확인 질문
                               </div>
                               <Inline text={followUp} />
@@ -2012,7 +2012,7 @@ export default function AiChatPage() {
                           </div>
                         )}
                         {msg._partialError && i === messages.length - 1 && streamError && (
-                          <div style={{ paddingLeft: 44, marginTop: 6, display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <div style={{ paddingLeft: 44, marginTop: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
                             <span style={{ fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>— 응답이 중간에 끊겼어</span>
                             <button
                               onClick={retryLastQuestion}
@@ -2031,9 +2031,9 @@ export default function AiChatPage() {
                   return (
                     <div key={i} className="chat-msg" style={{
                       display: 'flex', flexDirection: 'row-reverse', alignItems: 'flex-start',
-                      gap: 10, marginBottom: 16
+                      gap: 10, marginBottom: 8
                     }}>
-                      <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+                      <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
                         {(() => {
                           const imageSrc = msg.imagePreview || (msg.imageBase64 && (msg.imageBase64.startsWith('data:')
                             ? msg.imageBase64
@@ -2045,14 +2045,14 @@ export default function AiChatPage() {
                                 <img
                                   src={imageSrc}
                                   alt="내 이미지"
-                                  style={{ width: '100%', borderRadius: 14, objectFit: 'cover', maxHeight: 260, marginBottom: 14 }}
+                                  style={{ width: '100%', borderRadius: 14, objectFit: 'cover', maxHeight: 260, marginBottom: 6 }}
                                 />
                               )}
                               {msg.content && msg.content !== '(이미지)' && (
                                 <div style={{
                                   background: '#F3F4F6', color: '#111827',
-                                  borderRadius: '18px 18px 4px 18px', padding: '13px 18px',
-                                  fontSize: 16, lineHeight: 1.7, boxShadow: 'var(--shadow)',
+                                  borderRadius: '18px 18px 4px 18px', padding: '8px 14px',
+                                  fontSize: 16, lineHeight: 1.5, boxShadow: 'var(--shadow)',
                                   whiteSpace: 'pre-wrap', overflow: 'hidden'
                                 }}>
                                   {msg.content}
@@ -2067,7 +2067,7 @@ export default function AiChatPage() {
                 })}
 
                 {(loading || isStreaming) && (
-                  <div className="chat-msg" style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 20 }}>
+                  <div className="chat-msg" style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 }}>
                     <div style={{
                       width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
                       background: '#2563EB', display: 'flex', alignItems: 'center',
@@ -2075,7 +2075,7 @@ export default function AiChatPage() {
                     }}>
                       <span style={{ fontSize: 16, fontWeight: 700, color: '#fff', fontFamily: 'serif', lineHeight: 1 }}>Σ</span>
                     </div>
-                    <div style={{ maxWidth: 820, flex: 1, fontSize: 16, lineHeight: 1.8, position: 'relative' }}>
+                    <div style={{ maxWidth: 820, flex: 1, fontSize: 16, lineHeight: 1.5, position: 'relative' }}>
                       {loading && !streamingContent && (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 0' }}>
                           <span style={{
@@ -2102,7 +2102,7 @@ export default function AiChatPage() {
                         return (
                           <>
                             {diagrams.map((d, di) => (
-                              <div key={di} style={{ margin: '16px 0', textAlign: 'center' }}>
+                              <div key={di} style={{ margin: '8px 0', textAlign: 'center' }}>
                                 <div dangerouslySetInnerHTML={{ __html: d.svg }} style={{ display: 'inline-block', maxWidth: '100%', borderRadius: 12, overflow: 'hidden' }} />
                                 {d.caption && <div style={{ fontSize: 12, color: '#6B7280', marginTop: 6 }}>{d.caption}</div>}
                               </div>
@@ -2142,7 +2142,7 @@ export default function AiChatPage() {
                   const msg = msgs[streamError.type] || msgs.network
                   const isIncomplete = streamError.type === 'incomplete'
                   return (
-                    <div className="chat-msg" style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 20 }}>
+                    <div className="chat-msg" style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 }}>
                       <div style={{
                         width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
                         background: '#9CA3AF', display: 'flex', alignItems: 'center',
@@ -2153,9 +2153,9 @@ export default function AiChatPage() {
                       <div style={{
                         maxWidth: 480, background: '#F9FAFB',
                         border: '1px solid #E5E7EB', borderRadius: '4px 16px 16px 16px',
-                        padding: '12px 16px',
+                        padding: '8px 14px',
                       }}>
-                        <div style={{ fontSize: 14, color: '#374151', lineHeight: 1.6, marginBottom: 10 }}>{msg}</div>
+                        <div style={{ fontSize: 14, color: '#374151', lineHeight: 1.5, marginBottom: 6 }}>{msg}</div>
                         {isIncomplete && (
                           <button
                             onClick={() => { setStreamError(null); sendMessage('이어서 풀어줘') }}

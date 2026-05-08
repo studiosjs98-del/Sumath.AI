@@ -120,7 +120,7 @@ function renderToken(token, i) {
       return (
         <span
           key={i}
-          style={{ display: 'block', textAlign: 'center', padding: '8px 0', overflowX: 'auto', fontSize: '1.15em' }}
+          style={{ display: 'block', textAlign: 'center', padding: '3px 0', overflowX: 'auto', fontSize: '1.15em' }}
           dangerouslySetInnerHTML={{ __html: renderKatex(token.value, true) }}
         />
       )
@@ -150,7 +150,7 @@ export function MathText({ text, className = '' }) {
   if (!text) return null
   const tokens = tokenize(String(text))
   return (
-    <span className={className} style={{ lineHeight: 1.6 }}>
+    <span className={className} style={{ lineHeight: 1.5 }}>
       {tokens.map(renderToken)}
     </span>
   )
@@ -168,7 +168,7 @@ export function MathBlock({ latex, className = '' }) {
   const s = String(latex)
   if (s.includes('$') || KOREAN.test(s)) {
     return (
-      <div className={`math-block ${className}`} style={{ overflowX: 'auto', padding: '8px 0', lineHeight: 1.8 }}>
+      <div className={`math-block ${className}`} style={{ overflowX: 'auto', padding: '3px 0', lineHeight: 1.5 }}>
         <MathText text={s} />
       </div>
     )
@@ -177,7 +177,7 @@ export function MathBlock({ latex, className = '' }) {
     <div
       className={`math-block ${className}`}
       dangerouslySetInnerHTML={{ __html: renderKatex(s, true) }}
-      style={{ overflowX: 'auto', padding: '8px 0' }}
+      style={{ overflowX: 'auto', padding: '3px 0' }}
     />
   )
 }
