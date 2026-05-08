@@ -296,16 +296,11 @@ async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini') 
 // substantial enough to warrant o3-mini's reasoning (which doesn't support
 // vision). Image questions are routed elsewhere — never to o3-mini.
 function isHardQuestion(lastText, hasImage) {
+  if (lastText.length < 50) return false;
   if (hasImage) return false;
-  if (!lastText) return false;
 
   // Length-only trigger for clearly long questions.
   if (lastText.length > 200) return true;
-
-  // Keyword trigger requires a minimum length so that tiny conversational
-  // messages that happen to contain "log", "ln", etc. don't get routed to
-  // o3-mini. Picked 30 chars — roughly one sentence in Korean.
-  if (lastText.length < 30) return false;
 
   const keywords = [
     '적분', '미분', '로그', '증명', '극한', '수열', '급수', '행렬', '벡터', '확률',
@@ -324,11 +319,23 @@ function isHardQuestion(lastText, hasImage) {
 async function callO3Mini(systemPrompt, messages, res) {
   const oaiMessages = buildOaiMessages(systemPrompt, messages);
 
+  // Defensive: o3-mini does not support image_url parts. Even though the
+  // router shouldn't send image-bearing requests here, strip any image_url
+  // content from any message so a stale or unexpected payload can't crash
+  // the request with "Invalid content type. image_url is only supported by
+  // certain models."
+  const safeMessages = oaiMessages.map(m => {
+    if (Array.isArray(m.content)) {
+      return { ...m, content: m.content.filter(c => c.type === 'text').map(c => c.text).join('\n') };
+    }
+    return m;
+  });
+
   const response = await openai.chat.completions.create(
     {
       model: 'o3-mini',
       max_completion_tokens: 8000,
-      messages: oaiMessages,
+      messages: safeMessages,
     },
     { timeout: 120000 }
   );
