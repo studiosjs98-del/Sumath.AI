@@ -275,6 +275,54 @@ async function callO3Mini(systemPrompt, messages, res) {
   if (text) res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
 }
 
+// ── Phase 1: OCR — extract math problem from image into LaTeX ────────────────
+// Non-streaming gpt-4o vision call that converts an image into a LaTeX-only
+// problem statement so the solver can run on text. Logs timing and the first
+// 300 characters of the extracted LaTeX.
+async function ocrExtract(message) {
+  const t0 = Date.now();
+  console.log('[phase1-ocr] start');
+
+  const response = await openai.chat.completions.create(
+    {
+      model: 'gpt-4o',
+      max_tokens: 1500,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are an OCR system specialized in mathematical notation. Extract the math problem from the user-supplied image into LaTeX exactly as it appears. Preserve every symbol, fraction, exponent, subscript, integral, sum, root, and operator. Do NOT solve, do NOT explain, do NOT add commentary. If any character or expression is unreadable or ambiguous, mark that part with [?]. Return ONLY the LaTeX (no surrounding prose, no markdown code fences).'
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${message.imageMimeType || 'image/jpeg'};base64,${message.imageBase64}`
+              }
+            },
+            {
+              type: 'text',
+              text:
+                message.content && message.content !== '(이미지)'
+                  ? message.content
+                  : 'Extract the math problem from this image as LaTeX only.'
+            }
+          ]
+        }
+      ]
+    },
+    { timeout: 60000 }
+  );
+
+  const latex = (response.choices[0]?.message?.content || '').trim();
+  const ms = Date.now() - t0;
+  console.log(`[phase1-ocr] done in ${ms}ms — extracted: ${JSON.stringify(latex.slice(0, 300))}`);
+  return latex;
+}
+
 // ── Main route ───────────────────────────────────────────────────────────────
 router.post('/message', async (req, res) => {
   // Route-level keep-alive — fires every 15s for the whole request lifetime so
@@ -313,7 +361,25 @@ router.post('/message', async (req, res) => {
     const systemPrompt = langInstruction + '\n\n' + basePrompt;
 
     if (hasImage) {
-      await streamOpenAI(systemPrompt, messages, res, 'gpt-4o');
+      // Phase 1: OCR every image-bearing message into LaTeX, then strip the
+      // image and continue text-only. On per-image extraction failure, keep
+      // the original (with image) so direct vision still works for that turn.
+      const solveMessages = messages.slice();
+      for (let i = 0; i < solveMessages.length; i++) {
+        if (!solveMessages[i].imageBase64) continue;
+        try {
+          const latex = await ocrExtract(solveMessages[i]);
+          if (latex) {
+            const { imageBase64, imageMimeType, ...rest } = solveMessages[i];
+            solveMessages[i] = { ...rest, content: latex };
+          } else {
+            console.warn(`[phase1-ocr] empty extraction for message ${i} — keeping original image`);
+          }
+        } catch (ocrErr) {
+          console.warn(`[phase1-ocr] failed for message ${i} — keeping original image:`, ocrErr.message || ocrErr);
+        }
+      }
+      await streamOpenAI(systemPrompt, solveMessages, res, 'gpt-4o');
     } else if (hard) {
       try {
         await callO3Mini(systemPrompt, messages, res);
