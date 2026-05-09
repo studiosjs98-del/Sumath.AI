@@ -421,15 +421,17 @@ const SOLVER_PROMPT = `You are an expert mathematician. Produce a complete, rigo
 - Output is internal scratchwork — focus on correctness, not presentation. Plain prose with inline $...$ and display $$...$$ math. No need for friendly tone, Korean, or step-callout formatting; that's a later pass.`;
 
 // runSolver — non-streaming. Returns the raw solution text.
+// Called only on the hard/olympiad path, so token budget is sized for that.
 async function runSolver(problemText, wolframAnswer, model) {
   const t0 = Date.now();
-  console.log(`[phase4-solver] start (model: ${model})`);
+  const isReasoningModel = /^(o3|o3-mini|o4-mini)$/.test(model);
+  const effortLevel = isReasoningModel ? 'high' : 'n/a';
+  console.log(`[phase4-solver] start (model: ${model}, reasoning_effort: ${effortLevel})`);
 
   const userContent = wolframAnswer
-    ? `Problem:\n${problemText}\n\nVerified answer (ground truth, must match): ${wolframAnswer}\n\nProduce a rigorous step-by-step solution that arrives at exactly this answer.`
+    ? `Problem:\n${problemText}\n\nThe correct final answer is: ${wolframAnswer}\n\nShow the complete working that arrives at this answer. Never produce a solution that contradicts this answer. Produce a rigorous step-by-step solution.`
     : `Problem:\n${problemText}\n\nProduce a rigorous step-by-step solution. Double-check your work.`;
 
-  const isReasoningModel = /^(o3|o3-mini|o4-mini)$/.test(model);
   const params = {
     model,
     messages: [
@@ -438,9 +440,12 @@ async function runSolver(problemText, wolframAnswer, model) {
     ]
   };
   if (isReasoningModel) {
-    params.max_completion_tokens = 8000;
+    // Reasoning models: no temperature, use max_completion_tokens, ask for high-effort thinking.
+    params.max_completion_tokens = 16000;
+    params.reasoning_effort = 'high';
   } else {
-    params.max_tokens = 8000;
+    // Non-reasoning gpt-4o fallback: keep its temperature, scale tokens for hard problems.
+    params.max_tokens = 16000;
     params.temperature = 0.2;
   }
 
@@ -464,7 +469,7 @@ async function streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt
   const stream = await openai.chat.completions.create(
     {
       model: 'gpt-4o',
-      max_tokens: 8000,
+      max_tokens: 16000,
       temperature: 0.4,
       stream: true,
       messages: [
@@ -564,7 +569,7 @@ router.post('/message', async (req, res) => {
 
       // ── Phase 5: route by classified difficulty ─────────────────────────
       const isHardOrOlympiad = difficulty === 'hard' || difficulty === 'olympiad';
-      const solverModel = isHardOrOlympiad ? 'o3-mini' : 'gpt-4o';
+      const solverModel = isHardOrOlympiad ? 'o4-mini' : 'gpt-4o';
       console.log(`[router] topic=${topic} difficulty=${difficulty} solverModel=${solverModel} path=${isHardOrOlympiad ? 'two-pass' : 'streaming'} wolfram=${wolframAnswer ? 'yes' : 'no'}`);
 
       if (isHardOrOlympiad) {
@@ -582,7 +587,7 @@ router.post('/message', async (req, res) => {
         // answer, prepend it to the system prompt as ground truth.
         let groundedPrompt = systemPrompt;
         if (wolframAnswer) {
-          groundedPrompt += `\n\nVERIFIED ANSWER (ground truth, must match): ${wolframAnswer}\nYour solution MUST arrive at exactly this answer. Never contradict it.`;
+          groundedPrompt += `\n\nThe correct final answer is: ${wolframAnswer}\nShow the complete working that arrives at this answer. Never produce a solution that contradicts this answer.`;
         }
         await streamOpenAI(groundedPrompt, solveMessages, res, 'gpt-4o');
       }
