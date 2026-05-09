@@ -1,5 +1,6 @@
 const express = require('express');
 const openai = require('../services/openaiClient');
+const { wolframShortAnswer } = require('../services/wolframClient');
 const { authenticate } = require('./middleware');
 const { getLanguageInstruction } = require('../utils/language');
 
@@ -323,6 +324,153 @@ async function ocrExtract(message) {
   return latex;
 }
 
+// ── Phase 2: classify topic and difficulty ─────────────────────────────────
+// Non-streaming gpt-4o-mini call. Returns { topic, difficulty } with both
+// fields constrained to known values. On failure, defaults to algebra/medium
+// so the pipeline never crashes from a bad classification.
+const VALID_TOPICS = ['algebra', 'calculus', 'geometry', 'trigonometry', 'probability', 'number theory', 'olympiad'];
+const VALID_DIFFICULTIES = ['easy', 'medium', 'hard', 'olympiad'];
+
+async function classifyProblem(problemText) {
+  const t0 = Date.now();
+  console.log('[phase2-classify] start');
+
+  let topic = 'algebra';
+  let difficulty = 'medium';
+
+  try {
+    const response = await openai.chat.completions.create(
+      {
+        model: 'gpt-4o-mini',
+        max_tokens: 200,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You classify math problems. Respond with ONLY a JSON object containing two fields: "topic" (one of: algebra, calculus, geometry, trigonometry, probability, number theory, olympiad) and "difficulty" (one of: easy, medium, hard, olympiad). No prose, no markdown.'
+          },
+          {
+            role: 'user',
+            content: `Classify this math problem:\n\n${problemText}`
+          }
+        ]
+      },
+      { timeout: 30000 }
+    );
+
+    const raw = response.choices[0]?.message?.content || '{}';
+    const parsed = JSON.parse(raw);
+    const t = String(parsed.topic || '').toLowerCase().trim();
+    const d = String(parsed.difficulty || '').toLowerCase().trim();
+    if (VALID_TOPICS.includes(t)) topic = t;
+    if (VALID_DIFFICULTIES.includes(d)) difficulty = d;
+  } catch (err) {
+    console.warn('[phase2-classify] failed, using defaults (algebra/medium):', err.message || err);
+  }
+
+  const ms = Date.now() - t0;
+  console.log(`[phase2-classify] done in ${ms}ms — topic: ${topic}, difficulty: ${difficulty}`);
+  return { topic, difficulty };
+}
+
+// ── Phase 3: Wolfram Alpha lookup ──────────────────────────────────────────
+// Returns the Wolfram answer string on success or null on failure / no result.
+// Wolfram failures are non-fatal — pipeline continues, LLM solves unaided.
+async function wolframLookup(problemText) {
+  const t0 = Date.now();
+  console.log('[phase3-wolfram] start');
+  const answer = await wolframShortAnswer(problemText);
+  const ms = Date.now() - t0;
+  if (answer) {
+    console.log(`[phase3-wolfram] done in ${ms}ms — answer: ${JSON.stringify(answer.slice(0, 200))}`);
+  } else {
+    console.log(`[phase3-wolfram] done in ${ms}ms — no answer (LLM will solve unaided)`);
+  }
+  return answer;
+}
+
+// ── Phase 4: solver prompt (internal, correctness only) ────────────────────
+const SOLVER_PROMPT = `You are an expert mathematician. Produce a complete, rigorous step-by-step solution to the problem.
+- Show every algebraic transformation explicitly. Never skip steps.
+- Use correct LaTeX notation throughout (\\frac, \\log, \\int, \\sqrt, \\Rightarrow, etc.).
+- If a verified ground-truth answer is provided, your work MUST arrive at exactly that answer. Never contradict the verified answer.
+- If no verified answer is provided, solve from scratch and double-check.
+- Output is internal scratchwork — focus on correctness, not presentation. Plain prose with inline $...$ and display $$...$$ math. No need for friendly tone, Korean, or step-callout formatting; that's a later pass.`;
+
+// runSolver — non-streaming. Returns the raw solution text.
+async function runSolver(problemText, wolframAnswer, model) {
+  const t0 = Date.now();
+  console.log(`[phase4-solver] start (model: ${model})`);
+
+  const userContent = wolframAnswer
+    ? `Problem:\n${problemText}\n\nVerified answer (ground truth, must match): ${wolframAnswer}\n\nProduce a rigorous step-by-step solution that arrives at exactly this answer.`
+    : `Problem:\n${problemText}\n\nProduce a rigorous step-by-step solution. Double-check your work.`;
+
+  const isReasoningModel = /^(o3|o3-mini|o4-mini)$/.test(model);
+  const params = {
+    model,
+    messages: [
+      { role: 'system', content: SOLVER_PROMPT },
+      { role: 'user', content: userContent }
+    ]
+  };
+  if (isReasoningModel) {
+    params.max_completion_tokens = 8000;
+  } else {
+    params.max_tokens = 8000;
+    params.temperature = 0.2;
+  }
+
+  const response = await openai.chat.completions.create(params, { timeout: 120000 });
+  const solution = response.choices[0]?.message?.content || '';
+  const ms = Date.now() - t0;
+  console.log(`[phase4-solver] done in ${ms}ms — solution length: ${solution.length} chars`);
+  return solution;
+}
+
+// streamTutor — streaming. Reformats raw solution into the existing 존댓말
+// step format and writes it as SSE chunks. Owns its own keep-alive timer to
+// match streamOpenAI's pattern.
+async function streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res) {
+  const t0 = Date.now();
+  console.log('[phase4-tutor] start');
+
+  const wolframLine = wolframAnswer ? `\n\nVerified answer (must match): ${wolframAnswer}` : '';
+  const userContent = `Original problem:\n${problemText}\n\nRaw solution to reformat:\n${rawSolution}${wolframLine}\n\nReformat the raw solution into the standard tutor format described in the system prompt. Translate to friendly Korean 존댓말 (~습니다/~합니다) and use the 핵심 아이디어 / ① ② ③ / ④ 검산 / [ANSWER]value[/ANSWER] / 여기까지 괜찮아? structure exactly as shown in the example. Do not change any mathematical content or the final answer — translate and reformat only.`;
+
+  const stream = await openai.chat.completions.create(
+    {
+      model: 'gpt-4o',
+      max_tokens: 8000,
+      temperature: 0.4,
+      stream: true,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userContent }
+      ]
+    },
+    { timeout: 120000 }
+  );
+
+  let keepAliveTimer = setInterval(() => {
+    try { res.write(': keepalive\n\n') } catch (_) { clearInterval(keepAliveTimer) }
+  }, 15000);
+
+  try {
+    for await (const chunk of stream) {
+      const text = chunk.choices[0]?.delta?.content || '';
+      if (text) res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
+    }
+  } finally {
+    clearInterval(keepAliveTimer);
+  }
+
+  const ms = Date.now() - t0;
+  console.log(`[phase4-tutor] done in ${ms}ms`);
+}
+
 // ── Main route ───────────────────────────────────────────────────────────────
 router.post('/message', async (req, res) => {
   // Route-level keep-alive — fires every 15s for the whole request lifetime so
@@ -346,25 +494,19 @@ router.post('/message', async (req, res) => {
     res.socket?.setTimeout(120000);
     res.flushHeaders();
 
-    const hasImage = messages.some(m => m.imageBase64);
-    const lastText = extractMathQuery(messages) || '';
-    const hard = isHardQuestion(lastText, hasImage);
-    // Routing:
-    //   image attached       → gpt-4o    (vision-capable, follows depth prompt)
-    //   hard text-only       → o3-mini   (reasoning), fallback to gpt-4o on error
-    //   everything else      → gpt-4o    (gpt-4o-mini ignored the depth prompt)
-    const modelName = hasImage ? 'gpt-4o' : (hard ? 'o3-mini' : 'gpt-4o');
-
-    console.log('[model-router] using:', modelName, 'for message length:', lastText.length, 'image:', hasImage, 'hard:', hard);
-
     const basePrompt = buildSystemPrompt(grade, weakTopics);
     const systemPrompt = langInstruction + '\n\n' + basePrompt;
 
+    // Working copy. Phase 1 OCR will replace any image-bearing message's
+    // content with extracted LaTeX in this copy; original `messages` untouched.
+    const solveMessages = messages.slice();
+    const hasImage = solveMessages.some(m => m.imageBase64);
+    const lastText = extractMathQuery(messages) || '';
+
+    console.log('[router] start — image:', hasImage, 'lastText length:', lastText.length);
+
+    // ── Phase 1: OCR ──────────────────────────────────────────────────────
     if (hasImage) {
-      // Phase 1: OCR every image-bearing message into LaTeX, then strip the
-      // image and continue text-only. On per-image extraction failure, keep
-      // the original (with image) so direct vision still works for that turn.
-      const solveMessages = messages.slice();
       for (let i = 0; i < solveMessages.length; i++) {
         if (!solveMessages[i].imageBase64) continue;
         try {
@@ -379,16 +521,50 @@ router.post('/message', async (req, res) => {
           console.warn(`[phase1-ocr] failed for message ${i} — keeping original image:`, ocrErr.message || ocrErr);
         }
       }
+    }
+
+    // Latest user message's content (post-OCR if it was an image).
+    const lastUser = [...solveMessages].reverse().find(m => m.role === 'user');
+    const problemText = (typeof lastUser?.content === 'string' ? lastUser.content : '') || '';
+
+    // Casual / non-math input → skip classify + Wolfram and stream directly.
+    // Preserves the fast-path for chitchat without paying for classification
+    // and a 15s Wolfram timeout on inputs that aren't math problems.
+    const looksLikeMath = hasImage || !!lastText;
+    if (!looksLikeMath || !problemText.trim()) {
+      console.log('[router] non-math input — direct streaming, skipping classify/Wolfram/solver');
       await streamOpenAI(systemPrompt, solveMessages, res, 'gpt-4o');
-    } else if (hard) {
-      try {
-        await callO3Mini(systemPrompt, messages, res);
-      } catch (o3Err) {
-        console.warn('[model-router] o3-mini failed, falling back to gpt-4o:', o3Err.message || o3Err);
-        await streamOpenAI(systemPrompt, messages, res, 'gpt-4o');
-      }
     } else {
-      await streamOpenAI(systemPrompt, messages, res, 'gpt-4o');
+      // ── Phase 2: classify ───────────────────────────────────────────────
+      const { topic, difficulty } = await classifyProblem(problemText);
+
+      // ── Phase 3: Wolfram lookup ─────────────────────────────────────────
+      const wolframAnswer = await wolframLookup(problemText);
+
+      // ── Phase 5: route by classified difficulty ─────────────────────────
+      const isHardOrOlympiad = difficulty === 'hard' || difficulty === 'olympiad';
+      const solverModel = isHardOrOlympiad ? 'o3-mini' : 'gpt-4o';
+      console.log(`[router] topic=${topic} difficulty=${difficulty} solverModel=${solverModel} path=${isHardOrOlympiad ? 'two-pass' : 'streaming'} wolfram=${wolframAnswer ? 'yes' : 'no'}`);
+
+      if (isHardOrOlympiad) {
+        // Hard/olympiad: rigorous solver (non-streaming) → tutor reformat (streaming).
+        let rawSolution;
+        try {
+          rawSolution = await runSolver(problemText, wolframAnswer, solverModel);
+        } catch (solverErr) {
+          console.warn('[phase4-solver] reasoning model failed, falling back to gpt-4o:', solverErr.message || solverErr);
+          rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o');
+        }
+        await streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res);
+      } else {
+        // Easy/medium: single combined streaming call. If Wolfram returned an
+        // answer, prepend it to the system prompt as ground truth.
+        let groundedPrompt = systemPrompt;
+        if (wolframAnswer) {
+          groundedPrompt += `\n\nVERIFIED ANSWER (ground truth, must match): ${wolframAnswer}\nYour solution MUST arrive at exactly this answer. Never contradict it.`;
+        }
+        await streamOpenAI(groundedPrompt, solveMessages, res, 'gpt-4o');
+      }
     }
 
     res.write('data: [DONE]\n\n');
