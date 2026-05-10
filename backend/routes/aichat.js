@@ -87,82 +87,53 @@ function safeParseJson(text) {
 }
 
 
-const SYSTEM_PROMPT = `You are a Korean math tutor. You receive a raw rigorous solution from a separate solver and rewrite it as a clear structured explanation in Korean 존댓말.
+const SYSTEM_PROMPT = `당신은 한국 수학 전문 AI 튜터입니다. 모든 설명은 반드시 한국어로만 작성하세요.
+영어는 절대 사용하지 마세요.
 
-══════════════════════════════════════════════
-OUTPUT FORMAT — strictly required, no exceptions
-══════════════════════════════════════════════
+응답은 반드시 아래 마크업 태그 구조를 따르세요:
 
-Every response MUST follow this exact structure. The first non-empty line of your output must be the literal text "핵심 아이디어".
+[핵심아이디어]
+이 문제의 핵심 개념을 1~2문장으로 간결하게 설명하세요.
+무엇을 구하는 문제인지, 어떤 전략으로 접근할지만 씁니다.
+[/핵심아이디어]
 
-핵심 아이디어
-[One Korean sentence summarizing the key technique or insight used. 존댓말.]
+[풀이]
+STEP 1 | (단계 이름)
+이 단계에서 무엇을 하는지 한 문장으로 설명합니다.
+(수식)
+→ 이 결과가 의미하는 것: (한 문장 해석)
 
-① [Korean step title]
-[Brief Korean explanation, 1-2 sentences in 존댓말.]
+STEP 2 | (단계 이름)
+...
 
-$$[equation in LaTeX]$$
+각 STEP은 반드시:
+- 단계 이름이 있어야 합니다 (예: "판별식 계산", "경우 나누기")
+- 수식 뒤에 → 로 시작하는 해석 문장이 있어야 합니다
+- 다음 단계로 넘어가는 연결 문장으로 끝나야 합니다 (예: "이제 각 경우를 분석합니다.")
 
-[Apply the formula to the problem in Korean, 1-2 sentences.]
+경우를 나눌 때는 반드시:
+[경우 1] 제목
+내용
+결론: (한 문장)
 
-② [Korean step title]
-[One Korean sentence connecting this step to the previous one — what we do next and why.]
+[경우 2] 제목
+내용
+결론: (한 문장)
 
-$$[equation]$$
+[결합] 두 조건을 합치면: (결론)
+[/풀이]
 
-[Result in Korean.]
+[정리]
+최종 답: (답)
+핵심 포인트: (이 문제에서 배운 것 한 문장)
+[/정리]
 
-③ [Korean step title]
-[Brief Korean explanation, 1-2 sentences.]
-
-$$[equation and result]$$
-
-④ 검산
-[One Korean sentence stating that we substitute back to verify.]
-
-$$[verification by substitution]$$
-
-[ANSWER]value[/ANSWER]
-
-여기까지 괜찮아?
-
-══════════════════════════════════════════════
-ABSOLUTE TAG RULES — these are non-negotiable
-══════════════════════════════════════════════
-
-- Open with the literal Korean text "핵심 아이디어" on its own line.
-- Every solution step MUST start with one of: ① ② ③ ④ ⑤ ⑥ ⑦ ⑧ ⑨ ⑩ followed by a Korean title.
-- NEVER use plain numbered lists (1. 2. 3.) outside of these step blocks.
-- NEVER use markdown headers (#, ##, ###) or markdown bold (**, __).
-- The final answer MUST appear on its own line as exactly: [ANSWER]value[/ANSWER]
-  - "value" is the raw LaTeX answer with no surrounding $ delimiters.
-  - Example: [ANSWER]x = 5[/ANSWER] or [ANSWER]a = -2,\\ a = 3[/ANSWER]
-- The very last line of your response MUST be exactly: 여기까지 괜찮아?
-- A response without all four required tags (핵심 아이디어, ① ② ③ ④ steps, [ANSWER]…[/ANSWER], 여기까지 괜찮아?) is wrong.
-
-══════════════════════════════════════════════
-LANGUAGE RULES
-══════════════════════════════════════════════
-
-- Write entirely in Korean 존댓말 (~습니다 / ~합니다 endings).
-- NEVER output English sentences in the user-facing response.
-- NEVER output raw protocol scaffolding from the solver (e.g. "STEP 1 — READ THE PROBLEM EXACTLY"). Translate and reformat the mathematical content only.
-- Math: inline as $x$ or $a$, display as $$...$$. Never use \\(...\\) or \\[...\\].
-
-══════════════════════════════════════════════
-MATHEMATICAL FIDELITY — never alter the math
-══════════════════════════════════════════════
-
-- NEVER alter equations. NEVER simplify expressions. NEVER recompute values. The raw solution has already been verified — your job is ONLY to explain, format, and translate tone.
-- Never skip a case that the raw solution opened.
-- Never state a conclusion without showing the verification step.
-- If the raw solution is incomplete, state the final answer based on the work shown rather than leaving it open.
-
-COMPLETION RULES — these are mandatory:
-- Never truncate the solution.
-- Every case that was opened must be closed with a result.
-- The [ANSWER] tag must always appear before 여기까지 괜찮아?.
-- A response without [ANSWER] is always wrong.`;
+규칙:
+- 영어 단어 절대 사용 금지 (Set up, Solve, Determine 등 모두 금지)
+- 각 STEP 사이에 빈 줄 하나
+- 수식은 반드시 $...$ 또는 $$...$$ LaTeX 형식
+- 표준 KaTeX 명령어만 사용 (\\sin, \\cos, \\frac, \\leq, \\geq, \\Rightarrow 등)
+- \\s, \\E 같은 약식 명령어 절대 사용 금지`;
 
 function buildSystemPrompt(grade, weakTopics) {
   const gradeStr = grade || '고등학교';
@@ -419,7 +390,7 @@ async function warmStartSolver(problemText, maxTokens = DEFAULT_MAX_TOKENS) {
   try {
     const response = await openai.chat.completions.create(
       {
-        model: 'o4-mini',
+        model: 'gpt-5.5-2026-04-23',
         max_completion_tokens: maxTokens,
         reasoning_effort: 'medium',
         messages: [
@@ -821,13 +792,13 @@ async function compareAnswers(solutionA, solutionB) {
 
 // streamTutor — streaming. Reformats raw solution into the existing 존댓말
 // step format and writes it as SSE chunks. Accumulates the full output and
-// returns it so the route handler can post-check for the [ANSWER] tag.
+// returns it so the route handler can post-check for the closing [/정리] tag.
 async function streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res, maxTokens = DEFAULT_MAX_TOKENS) {
   const t0 = Date.now();
   console.log(`[phase4-tutor] start (maxTokens: ${maxTokens})`);
 
-  const wolframLine = wolframAnswer ? `\n\nVerified answer (must match): ${wolframAnswer}` : '';
-  const userContent = `Original problem:\n${problemText}\n\nRaw solution to reformat:\n${rawSolution}${wolframLine}\n\nReformat the raw solution into the standard tutor format described in the system prompt. Translate to friendly Korean 존댓말 (~습니다/~합니다) and use the 핵심 아이디어 / ① ② ③ / ④ 검산 / [ANSWER]value[/ANSWER] / 여기까지 괜찮아? structure exactly as shown in the example. Do not change any mathematical content or the final answer — translate and reformat only.`;
+  const wolframLine = wolframAnswer ? `\n\n검증된 정답 (반드시 일치해야 함): ${wolframAnswer}` : '';
+  const userContent = `원본 문제:\n${problemText}\n\n재구성할 raw 풀이:\n${rawSolution}${wolframLine}\n\n위 raw 풀이를 시스템 프롬프트에 정의된 태그 구조([핵심아이디어]/[풀이]/[정리], STEP N | 제목, [경우 N], [결합])로 정확히 재구성하세요. 모든 설명은 한국어로만 작성하고, 수학적 내용과 최종 답은 절대 변경하지 마세요. 번역과 재구성만 수행합니다.`;
 
   const stream = await openai.chat.completions.create(
     {
@@ -861,7 +832,7 @@ async function streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt
   }
 
   const ms = Date.now() - t0;
-  console.log(`[phase4-tutor] done in ${ms}ms — output length: ${accumulated.length} chars, has [ANSWER]: ${accumulated.includes('[ANSWER]')}`);
+  console.log(`[phase4-tutor] done in ${ms}ms — output length: ${accumulated.length} chars, has [/정리]: ${accumulated.includes('[/정리]')}`);
   return accumulated;
 }
 
@@ -873,7 +844,7 @@ async function streamTutorCompletion(rawSolution, res, maxTokens = DEFAULT_MAX_T
   const t0 = Date.now();
   console.log(`[phase4-tutor-completion] start (maxTokens: ${maxTokens})`);
 
-  const userContent = `The previous formatting attempt did not include a final answer.\nThe raw solution is: ${rawSolution}\nYour only job in this retry is to complete the solution and end with [ANSWER]value[/ANSWER]. Do not rewrite the whole explanation. Just complete it and add the final answer.`;
+  const userContent = `이전 응답에 [정리] 블록이 누락되었습니다.\nRaw 풀이: ${rawSolution}\n전체를 다시 쓰지 말고, 누락된 마무리 부분만 이어서 작성하세요. 반드시 다음 형식으로 끝내세요:\n\n[정리]\n최종 답: (답)\n핵심 포인트: (한 문장)\n[/정리]`;
 
   const stream = await openai.chat.completions.create(
     {
@@ -907,7 +878,7 @@ async function streamTutorCompletion(rawSolution, res, maxTokens = DEFAULT_MAX_T
   }
 
   const ms = Date.now() - t0;
-  console.log(`[phase4-tutor-completion] done in ${ms}ms — output length: ${accumulated.length} chars, has [ANSWER]: ${accumulated.includes('[ANSWER]')}`);
+  console.log(`[phase4-tutor-completion] done in ${ms}ms — output length: ${accumulated.length} chars, has [/정리]: ${accumulated.includes('[/정리]')}`);
   return accumulated;
 }
 
@@ -1150,11 +1121,9 @@ router.post('/message', async (req, res) => {
         const tutorOutput = await streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res, maxTokens);
         console.log(`[phase4-tutor] stream complete elapsed=${elapsed()}ms`);
 
-        // ── FIX 4: incomplete-tutor detection + completion retry ─────────
-        // If the tutor pass finished without emitting [ANSWER], stream a
-        // focused completion that appends the missing tail to the same SSE
-        // connection.
-        if (!tutorOutput.includes('[ANSWER]')) {
+        // If the tutor pass finished without emitting the closing [/정리]
+        // block, stream a focused completion that appends the missing tail.
+        if (!tutorOutput.includes('[/정리]')) {
           console.log(`[completion-retry] response was incomplete — retrying tutor pass elapsed=${elapsed()}ms`);
           try {
             await streamTutorCompletion(rawSolution, res, maxTokens);
