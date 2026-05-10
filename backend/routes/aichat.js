@@ -479,6 +479,66 @@ async function wolframLookup(problemText) {
 // ── Phase 4: solver prompt (internal, correctness only) ────────────────────
 const SOLVER_PROMPT = `You are an elite competition mathematician solving Korean CSAT and olympiad problems.
 
+CRITICAL MATHEMATICAL RULES — violation of any of these is a fatal error:
+
+RULE — COMPOSITE FUNCTION EQUATIONS
+When solving f(f(x)) = 0:
+Step 1: Find ALL roots of f(t) = 0. Call them r₁, r₂, ..., rₙ.
+Step 2: For each root rᵢ, solve f(x) = rᵢ as a completely separate equation.
+Step 3: Collect ALL solutions across all equations.
+Step 4: Remove duplicates. Count only distinct values.
+Never say "f(f(x))=0 means f(x)=0 or f(x)=c" without specifying exactly
+what c is and why. Never skip Step 1.
+
+RULE — CUBIC FUNCTION ANALYSIS
+When counting solutions to f(x) = c for a cubic function f:
+You MUST find the critical points by computing f'(x) = 0.
+You MUST compute the local maximum value M = f(x₁) and local minimum value m = f(x₂).
+Then and only then apply:
+- c > M or c < m → exactly 1 real solution
+- c = M or c = m → exactly 2 real solutions (one is a repeated root)
+- m < c < M → exactly 3 real solutions
+Never count intersections without completing this analysis first.
+
+RULE — COUNTING DISTINCT ROOTS IN COMPOSITE EQUATIONS
+After solving f(x) = r₁, f(x) = r₂, ..., f(x) = rₙ separately:
+List every solution found explicitly.
+Check every pair of solutions for equality.
+Only count a value once no matter how many equations it satisfies.
+Never add root counts from separate equations without checking for overlap.
+
+RULE — REPEATED ROOTS AND MULTIPLICITY
+The problem asks for distinct real solutions, not counting multiplicity.
+A repeated root x = a where f(x) - c = (x-a)²(x-b) counts as ONE distinct solution.
+Never confuse multiplicity with the number of distinct values.
+
+RULE — "SUM OF ALL POSSIBLE VALUES OF a"
+This phrasing always means: find each specific value of a that satisfies
+the condition, then add those values together.
+This is NEVER an integral. Never write ∫ to answer this type of question.
+If the valid set of a is an interval, the problem is asking for boundary
+values or specific points within it, not the integral over the interval.
+The answer is always a finite sum of specific numbers.
+
+RULE — PARAMETER ANALYSIS
+When a problem asks for values of a parameter a such that an equation has
+exactly n distinct roots:
+Set up the discriminant conditions or intersection conditions explicitly.
+Solve for specific values of a algebraically.
+Test every candidate value by substituting back and counting roots explicitly.
+Never claim an entire interval of a works without verifying at least three
+sample points within it.
+
+RULE — MANDATORY VERIFICATION
+For every candidate value of a found:
+Substitute it into the original function explicitly.
+Solve every required equation f(x) = rᵢ with that specific value of a.
+List every distinct root obtained.
+Count them.
+Confirm the count matches the required number.
+If it does not match, reject that value of a and explain why.
+A solution without explicit verification of every candidate is incomplete.
+
 Rules:
 - Never guess or jump to conclusions
 - Always factor and simplify first before analyzing
