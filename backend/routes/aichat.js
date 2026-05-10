@@ -95,17 +95,6 @@ function extractMathQuery(messages) {
   return mathPatterns.test(content) ? content : null;
 }
 
-function classifyDifficulty(message) {
-  const killer = ['(가)와 (나)', '(나)와 (다)', '조건 (가)', '조건 (나)', '최고차항', '킬러', '실수 전체', '미분가능', '모든 실수', '정적분으로 정의', '점화식', '수열의 합', '이중근', '변곡점'];
-  const hard = ['극값', '극대', '극소', '연속', '불연속', '극한', '치환적분', '부분적분', '로피탈', '증명', '역함수', '합성함수', '접선', '중근', '근과 계수', '여사건', '인수정리', '조립제법', '귀류법', '수학적 귀납법'];
-  const medium = ['미분', '적분', '삼각함수', '로그', '지수', '확률', '통계', '수열', '벡터', '등차', '등비'];
-
-  if (killer.some(w => message.includes(w))) return 'killer';
-  if (hard.some(w => message.includes(w))) return 'hard';
-  if (medium.some(w => message.includes(w))) return 'medium';
-  return 'easy';
-}
-
 function buildOaiMessages(systemPrompt, messages) {
   return [
     { role: 'system', content: systemPrompt },
@@ -155,58 +144,6 @@ async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini') 
   } finally {
     clearInterval(keepAliveTimer);
   }
-}
-
-// Hard-question signals: returns true only if the question is text-only AND
-// substantial enough to warrant o3-mini's reasoning (which doesn't support
-// vision). Image questions are routed elsewhere — never to o3-mini.
-function isHardQuestion(lastText, hasImage) {
-  if (lastText.length < 50) return false;
-  if (hasImage) return false;
-
-  // Length-only trigger for clearly long questions.
-  if (lastText.length > 200) return true;
-
-  const keywords = [
-    '적분', '미분', '로그', '증명', '극한', '수열', '급수', '행렬', '벡터', '확률',
-    'proof', 'integral', 'derivative', 'limit', 'series', 'matrix', 'vector',
-    'probability', 'log', 'ln'
-  ];
-  if (keywords.some(kw => lastText.includes(kw))) return true;
-
-  // Advanced LaTeX notation
-  if (/\\int|\\sum|\\lim|\\sqrt|\\frac\{[^}]*\{/.test(lastText)) return true;
-
-  return false;
-}
-
-// Non-streaming path — o3-mini, collects full response then emits as one SSE chunk
-async function callO3Mini(systemPrompt, messages, res) {
-  const oaiMessages = buildOaiMessages(systemPrompt, messages);
-
-  // Defensive: o3-mini does not support image_url parts. Even though the
-  // router shouldn't send image-bearing requests here, strip any image_url
-  // content from any message so a stale or unexpected payload can't crash
-  // the request with "Invalid content type. image_url is only supported by
-  // certain models."
-  const safeMessages = oaiMessages.map(m => {
-    if (Array.isArray(m.content)) {
-      return { ...m, content: m.content.filter(c => c.type === 'text').map(c => c.text).join('\n') };
-    }
-    return m;
-  });
-
-  const response = await openai.chat.completions.create(
-    {
-      model: 'o3-mini',
-      max_completion_tokens: 8000,
-      messages: safeMessages,
-    },
-    { timeout: 120000 }
-  );
-
-  const text = response.choices[0]?.message?.content || '';
-  if (text) res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
 }
 
 // ── Phase 1: OCR — extract math problem from image into LaTeX ────────────────
@@ -429,43 +366,6 @@ async function streamStructuralAnalysis(res, classification, decomposition) {
 
   const ms = Date.now() - t0;
   console.log(`[phase3-structural] done in ${ms}ms — streamed ${text.length} chars`);
-}
-
-// ── Phase 2: warm-start solver ─────────────────────────────────────────────
-// o4-mini with reasoning_effort: "medium". Runs in parallel with classify /
-// Wolfram / decompose so the heaviest call starts as early as possible. No
-// Wolfram grounding here (Wolfram is concurrent); the verifier in Phase 5
-// catches errors and the retry path adds Wolfram context if needed.
-async function warmStartSolver(problemText) {
-  const t0 = Date.now();
-  console.log('[phase2-warmstart] start (o4-mini, reasoning_effort: medium)');
-
-  let solution = null;
-  try {
-    const response = await openai.chat.completions.create(
-      {
-        model: 'o4-mini',
-        max_completion_tokens: 16000,
-        reasoning_effort: 'medium',
-        messages: [
-          { role: 'system', content: SOLVER_PROMPT },
-          { role: 'user', content: `Problem:\n${problemText}\n\nProduce a rigorous step-by-step solution. Double-check your work.` }
-        ]
-      },
-      { timeout: 120000 }
-    );
-    solution = response.choices[0]?.message?.content || '';
-  } catch (err) {
-    console.warn('[phase2-warmstart] failed:', err.message || err);
-  }
-
-  const ms = Date.now() - t0;
-  if (solution) {
-    console.log(`[phase2-warmstart] done in ${ms}ms — solution length: ${solution.length} chars`);
-  } else {
-    console.log(`[phase2-warmstart] done in ${ms}ms — no solution (will fall back to runSolver in Phase 4)`);
-  }
-  return solution;
 }
 
 // ── Phase 3: Wolfram Alpha lookup ──────────────────────────────────────────
