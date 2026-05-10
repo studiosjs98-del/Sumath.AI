@@ -87,42 +87,82 @@ function safeParseJson(text) {
 }
 
 
-const SYSTEM_PROMPT = `You are a Korean math tutor. You will receive a raw rigorous solution and rewrite it as a clear structured explanation in Korean 존댓말.
+const SYSTEM_PROMPT = `You are a Korean math tutor. You receive a raw rigorous solution from a separate solver and rewrite it as a clear structured explanation in Korean 존댓말.
 
-Follow this exact narrative structure every time:
+══════════════════════════════════════════════
+OUTPUT FORMAT — strictly required, no exceptions
+══════════════════════════════════════════════
 
-1. Open by translating the problem condition into plain Korean. What does the condition actually require structurally? State this in one or two sentences before any calculation.
+Every response MUST follow this exact structure. The first non-empty line of your output must be the literal text "핵심 아이디어".
 
-2. Step 1 — Analyze f(x) first. Factor it completely. State all roots clearly. Show the discriminant calculation to determine how many roots exist depending on the parameter.
+핵심 아이디어
+[One Korean sentence summarizing the key technique or insight used. 존댓말.]
 
-3. Step 2 — Find critical points. Compute f'(x), find the critical points, and compute the exact local maximum M and local minimum m. Show every algebraic step.
+① [Korean step title]
+[Brief Korean explanation, 1-2 sentences in 존댓말.]
 
-4. Step 3 — Interpret the geometry. Explain that f(f(x))=0 means f(x) must equal each root of f(x)=0. Explain that the number of solutions to f(x)=c depends on where c sits relative to m and M. State explicitly:
-   - c is between m and M → 3 solutions
-   - c equals m or M → 2 solutions
-   - c is outside [m,M] → 1 solution
+$$[equation in LaTeX]$$
 
-5. Step 4 — Case analysis. Label each case clearly. For each case compute the total root count. Reject cases that do not give the required total. Keep cases that do.
+[Apply the formula to the problem in Korean, 1-2 sentences.]
 
-6. Step 5 — Verify every candidate value of a by substituting back and confirming the root count matches exactly.
+② [Korean step title]
+[One Korean sentence connecting this step to the previous one — what we do next and why.]
 
-7. Conclusion — State all valid values of a and compute the final answer clearly.
+$$[equation]$$
 
-Rules:
-- Write in Korean 존댓말
-- Use all existing formatting tags the frontend renders including step blocks, 핵심 아이디어, and 최종 답
-- NEVER alter equations. NEVER simplify expressions. NEVER recompute values. The raw solution you receive has already been verified — your job is ONLY to explain, format, and translate tone. If you change a number, an equation, or a result, you have failed.
-- Never skip a case even if it seems obvious
-- Never state a conclusion without showing the verification
-- The explanation should feel like a tutor telling a story where each step answers the natural question a student would ask next
-- Match the depth and rigor of the MathGPT explanation provided as reference
+[Result in Korean.]
+
+③ [Korean step title]
+[Brief Korean explanation, 1-2 sentences.]
+
+$$[equation and result]$$
+
+④ 검산
+[One Korean sentence stating that we substitute back to verify.]
+
+$$[verification by substitution]$$
+
+[ANSWER]value[/ANSWER]
+
+여기까지 괜찮아?
+
+══════════════════════════════════════════════
+ABSOLUTE TAG RULES — these are non-negotiable
+══════════════════════════════════════════════
+
+- Open with the literal Korean text "핵심 아이디어" on its own line.
+- Every solution step MUST start with one of: ① ② ③ ④ ⑤ ⑥ ⑦ ⑧ ⑨ ⑩ followed by a Korean title.
+- NEVER use plain numbered lists (1. 2. 3.) outside of these step blocks.
+- NEVER use markdown headers (#, ##, ###) or markdown bold (**, __).
+- The final answer MUST appear on its own line as exactly: [ANSWER]value[/ANSWER]
+  - "value" is the raw LaTeX answer with no surrounding $ delimiters.
+  - Example: [ANSWER]x = 5[/ANSWER] or [ANSWER]a = -2,\\ a = 3[/ANSWER]
+- The very last line of your response MUST be exactly: 여기까지 괜찮아?
+- A response without all four required tags (핵심 아이디어, ① ② ③ ④ steps, [ANSWER]…[/ANSWER], 여기까지 괜찮아?) is wrong.
+
+══════════════════════════════════════════════
+LANGUAGE RULES
+══════════════════════════════════════════════
+
+- Write entirely in Korean 존댓말 (~습니다 / ~합니다 endings).
+- NEVER output English sentences in the user-facing response.
+- NEVER output raw protocol scaffolding from the solver (e.g. "STEP 1 — READ THE PROBLEM EXACTLY"). Translate and reformat the mathematical content only.
+- Math: inline as $x$ or $a$, display as $$...$$. Never use \\(...\\) or \\[...\\].
+
+══════════════════════════════════════════════
+MATHEMATICAL FIDELITY — never alter the math
+══════════════════════════════════════════════
+
+- NEVER alter equations. NEVER simplify expressions. NEVER recompute values. The raw solution has already been verified — your job is ONLY to explain, format, and translate tone.
+- Never skip a case that the raw solution opened.
+- Never state a conclusion without showing the verification step.
+- If the raw solution is incomplete, state the final answer based on the work shown rather than leaving it open.
 
 COMPLETION RULES — these are mandatory:
-- Never truncate the solution
-- Every case that was opened must be closed with a result
-- The [ANSWER] tag must always appear at the end
-- If the raw solution you received is incomplete, state explicitly what the final answer is based on the work shown rather than leaving it open
-- A response without [ANSWER] is always wrong`;
+- Never truncate the solution.
+- Every case that was opened must be closed with a result.
+- The [ANSWER] tag must always appear before 여기까지 괜찮아?.
+- A response without [ANSWER] is always wrong.`;
 
 function buildSystemPrompt(grade, weakTopics) {
   const gradeStr = grade || '고등학교';
@@ -418,38 +458,41 @@ const TOPIC_KO = {
   'olympiad': '올림피아드'
 };
 const DIFFICULTY_KO = { easy: '쉬움', medium: '중간', hard: '어려움', olympiad: '올림피아드' };
+// Topic-specific approach hints — fixed Korean strings, never derived from
+// model output, so no English / prompt-content can leak through.
+const APPROACH_BY_TOPIC = {
+  'algebra': '식을 정리하고 변수에 대해 풀어 답을 구하겠습니다.',
+  'calculus': '도함수를 구하고 임계점과 극값을 분석하여 답을 구하겠습니다.',
+  'geometry': '도형의 성질과 좌표를 활용하여 답을 구하겠습니다.',
+  'trigonometry': '삼각함수의 항등식과 주기성을 활용하여 답을 구하겠습니다.',
+  'probability': '경우의 수를 세어 확률을 계산하겠습니다.',
+  'number theory': '수의 성질과 정수의 구조를 분석하여 답을 구하겠습니다.',
+  'olympiad': '구조적 통찰을 바탕으로 단계적으로 답을 구하겠습니다.'
+};
 
-async function streamStructuralAnalysis(res, classification, decomposition) {
+// Phase 3 — streams a short Korean intro derived ONLY from classification
+// (topic + difficulty). Never includes decomposition output (which can come
+// back in English) or any other model-generated text. If classification is
+// null/unknown, falls back to a single neutral Korean sentence.
+async function streamStructuralAnalysis(res, classification /* decomposition unused */) {
   const t0 = Date.now();
   console.log('[phase3-structural] start');
 
-  const knownTopic = classification && classification.topic && classification.topic !== 'unknown';
-  const lines = [];
+  const knownTopic = classification
+    && classification.topic
+    && classification.topic !== 'unknown'
+    && TOPIC_KO[classification.topic];
 
-  // 핵심 아이디어 callout — one honest sentence summarizing topic + approach.
-  lines.push('핵심 아이디어');
+  let text;
   if (!knownTopic) {
-    lines.push('이 문제의 구조를 분석하고 있습니다.');
+    text = '문제를 분석하고 있습니다...\n\n';
   } else {
-    const topicKo = TOPIC_KO[classification.topic] || classification.topic;
-    const diffKo = DIFFICULTY_KO[classification.difficulty] || classification.difficulty;
-    let summary = `이 문제는 ${topicKo} 영역의 ${diffKo} 난도 문제입니다.`;
-    if (classification.needs_casework) summary += ' 경우 분석이 필요합니다.';
-    if (classification.is_multi_part) summary += ' 여러 소문제로 구성되어 있습니다.';
-    lines.push(summary);
-  }
-  lines.push('');
-
-  // Approach derived from decomposition (only if we have real content).
-  if (decomposition && decomposition.length > 0) {
-    lines.push('다음 순서로 풀이를 진행하겠습니다:');
-    decomposition.forEach((step, i) => {
-      lines.push(`${i + 1}. ${step}`);
-    });
-    lines.push('');
+    const topicKo = TOPIC_KO[classification.topic];
+    const diffKo = DIFFICULTY_KO[classification.difficulty] || '';
+    const approach = APPROACH_BY_TOPIC[classification.topic] || '체계적인 접근으로 답을 구하겠습니다.';
+    text = `이 문제는 ${topicKo} 유형의 ${diffKo} 난이도 문제입니다. ${approach}\n\n`;
   }
 
-  const text = lines.join('\n') + '\n';
   try {
     res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
   } catch (writeErr) {
@@ -457,7 +500,7 @@ async function streamStructuralAnalysis(res, classification, decomposition) {
   }
 
   const ms = Date.now() - t0;
-  console.log(`[phase3-structural] done in ${ms}ms — streamed ${text.length} chars`);
+  console.log(`[phase3-structural] done in ${ms}ms — streamed ${text.length} chars (knownTopic=${!!knownTopic})`);
 }
 
 // ── Phase 3: Wolfram Alpha lookup ──────────────────────────────────────────
@@ -935,6 +978,22 @@ router.post('/message', async (req, res) => {
 
     const lastUser = [...solveMessages].reverse().find(m => m.role === 'user');
     const problemText = (typeof lastUser?.content === 'string' ? lastUser.content : '') || '';
+
+    // Bug 3 — OCR failure on latest image: if the latest user message still
+    // carries imageBase64 after the OCR loop AND has no usable text content,
+    // OCR failed completely. Emit a clean Korean error instead of letting the
+    // pipeline hand an empty problem to a downstream model that will respond
+    // with a confused apology.
+    const ocrFailedOnLatestImage =
+      lastUser && lastUser.imageBase64 &&
+      (!problemText.trim() || /^\(이미지\)?$/.test(problemText.trim()) || problemText.trim().length < 3);
+    if (ocrFailedOnLatestImage) {
+      console.warn(`[ocr-fallback] OCR failed for latest image — emitting Korean error elapsed=${elapsed()}ms`);
+      res.write(`data: ${JSON.stringify({ chunk: '이미지를 인식하지 못했습니다. 텍스트로 문제를 입력해 주시거나 더 선명한 이미지로 다시 시도해 주세요.\n' })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
 
     // Casual / non-math input → skip classify + Wolfram + solver, stream directly.
     const looksLikeMath = hasImage || !!lastText;
