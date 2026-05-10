@@ -67,6 +67,7 @@ Follow this exact narrative structure every time:
 Rules:
 - Write in Korean 존댓말
 - Use all existing formatting tags the frontend renders including step blocks, 핵심 아이디어, and 최종 답
+- NEVER alter equations. NEVER simplify expressions. NEVER recompute values. The raw solution you receive has already been verified — your job is ONLY to explain, format, and translate tone. If you change a number, an equation, or a result, you have failed.
 - Never skip a case even if it seems obvious
 - Never state a conclusion without showing the verification
 - The explanation should feel like a tutor telling a story where each step answers the natural question a student would ask next
@@ -256,10 +257,37 @@ async function ocrExtract(message) {
   return latex;
 }
 
+// ── Phase 1: LaTeX normalization (string-only, no API call) ─────────────────
+// Conservative cleanup that runs on the OCR output. Fixes the most common
+// rendering / reasoning hazards without trying to balance arbitrary expressions:
+//   - strip markdown code fences
+//   - convert \(...\) → $...$  and \[...\] → $$...$$
+//   - wrap bare |x| absolute values in \left|...\right| so KaTeX renders right
+//   - collapse leading/trailing whitespace
+function normalizeLatex(latex) {
+  if (!latex || typeof latex !== 'string') return '';
+  let s = latex.trim();
+
+  // Strip markdown code fences (```latex / ```math / ```tex / ```).
+  s = s.replace(/^```(?:latex|math|tex)?\s*\n?/i, '').replace(/\n?\s*```\s*$/i, '');
+
+  // \(...\) → $...$
+  s = s.replace(/\\\(\s*([\s\S]+?)\s*\\\)/g, '$$$1$$');
+  // \[...\] → $$...$$
+  s = s.replace(/\\\[\s*([\s\S]+?)\s*\\\]/g, '$$$$$1$$$$');
+
+  // Wrap bare |...| absolute values in \left|...\right|. Only single-line,
+  // non-empty content, and not already wrapped. Skips bars that look like
+  // LaTeX math-mode set-builder pipes by requiring at least one alphanumeric.
+  s = s.replace(/(?<!\\left)\|([^|\n]*[A-Za-z0-9][^|\n]*?)\|(?!\\right)/g, '\\left|$1\\right|');
+
+  return s.trim();
+}
+
 // ── Phase 2: classify topic and difficulty ─────────────────────────────────
-// Non-streaming gpt-4o-mini call. Returns { topic, difficulty } with both
-// fields constrained to known values. On failure, defaults to algebra/medium
-// so the pipeline never crashes from a bad classification.
+// Non-streaming gpt-4o-mini call. Returns { topic, difficulty, needs_casework,
+// is_multi_part } with all fields constrained to known values. On failure,
+// defaults to algebra/medium/false/false so the pipeline never crashes.
 const VALID_TOPICS = ['algebra', 'calculus', 'geometry', 'trigonometry', 'probability', 'number theory', 'olympiad'];
 const VALID_DIFFICULTIES = ['easy', 'medium', 'hard', 'olympiad'];
 
@@ -269,6 +297,8 @@ async function classifyProblem(problemText) {
 
   let topic = 'algebra';
   let difficulty = 'medium';
+  let needs_casework = false;
+  let is_multi_part = false;
 
   try {
     const response = await openai.chat.completions.create(
@@ -281,7 +311,7 @@ async function classifyProblem(problemText) {
           {
             role: 'system',
             content:
-              'You classify math problems. Respond with ONLY a JSON object containing two fields: "topic" (one of: algebra, calculus, geometry, trigonometry, probability, number theory, olympiad) and "difficulty" (one of: easy, medium, hard, olympiad). No prose, no markdown.'
+              'You classify math problems. Respond with ONLY a JSON object containing four fields: "topic" (one of: algebra, calculus, geometry, trigonometry, probability, number theory, olympiad), "difficulty" (one of: easy, medium, hard, olympiad), "needs_casework" (boolean — true if the problem requires breaking into cases such as |x| or piecewise functions or discriminant cases), and "is_multi_part" (boolean — true if the problem has multiple labeled subparts like (a)(b)(c) or 1)2)3)). No prose, no markdown.'
           },
           {
             role: 'user',
@@ -298,13 +328,144 @@ async function classifyProblem(problemText) {
     const d = String(parsed.difficulty || '').toLowerCase().trim();
     if (VALID_TOPICS.includes(t)) topic = t;
     if (VALID_DIFFICULTIES.includes(d)) difficulty = d;
+    if (typeof parsed.needs_casework === 'boolean') needs_casework = parsed.needs_casework;
+    if (typeof parsed.is_multi_part === 'boolean') is_multi_part = parsed.is_multi_part;
   } catch (err) {
-    console.warn('[phase2-classify] failed, using defaults (algebra/medium):', err.message || err);
+    console.warn('[phase2-classify] failed, using defaults:', err.message || err);
   }
 
   const ms = Date.now() - t0;
-  console.log(`[phase2-classify] done in ${ms}ms — topic: ${topic}, difficulty: ${difficulty}`);
-  return { topic, difficulty };
+  console.log(`[phase2-classify] done in ${ms}ms — topic: ${topic}, difficulty: ${difficulty}, casework: ${needs_casework}, multi_part: ${is_multi_part}`);
+  return { topic, difficulty, needs_casework, is_multi_part };
+}
+
+// ── Phase 2: decompose into ordered subproblems ────────────────────────────
+// Non-streaming gpt-4o-mini call. Returns an array of subproblem strings
+// (max 5). Empty array on failure or non-array response.
+async function decomposeProblem(problemText) {
+  const t0 = Date.now();
+  console.log('[phase2-decompose] start');
+
+  let steps = [];
+  try {
+    const response = await openai.chat.completions.create(
+      {
+        model: 'gpt-4o-mini',
+        max_tokens: 600,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Break this math problem into a list of logical subproblems that must be solved in order. Return ONLY a JSON object of the shape {"steps": ["...", "...", ...]} with at most 5 short string entries. Each entry is one subproblem to solve in order. No prose.'
+          },
+          { role: 'user', content: problemText }
+        ]
+      },
+      { timeout: 30000 }
+    );
+    const raw = response.choices[0]?.message?.content || '{}';
+    const parsed = JSON.parse(raw);
+    const arr = Array.isArray(parsed?.steps) ? parsed.steps : (Array.isArray(parsed) ? parsed : []);
+    steps = arr.slice(0, 5).map(s => String(s || '').trim()).filter(Boolean);
+  } catch (err) {
+    console.warn('[phase2-decompose] failed:', err.message || err);
+  }
+
+  const ms = Date.now() - t0;
+  console.log(`[phase2-decompose] done in ${ms}ms — ${steps.length} subproblem(s): ${JSON.stringify(steps).slice(0, 300)}`);
+  return steps;
+}
+
+// ── Phase 3: safe early streaming ──────────────────────────────────────────
+// Streams a structural-analysis intro (topic + approach + ordered subproblems)
+// to the client immediately after Phase 2 completes, so the user sees content
+// while Phase 4-7 are still cooking. NEVER includes computed roots, equations,
+// or final answers — meta-reasoning only.
+const TOPIC_KO = {
+  'algebra': '대수',
+  'calculus': '미적분',
+  'geometry': '기하',
+  'trigonometry': '삼각함수',
+  'probability': '확률',
+  'number theory': '정수론',
+  'olympiad': '올림피아드'
+};
+const DIFFICULTY_KO = { easy: '쉬움', medium: '중간', hard: '어려움', olympiad: '올림피아드' };
+
+async function streamStructuralAnalysis(res, classification, decomposition) {
+  const t0 = Date.now();
+  console.log('[phase3-structural] start');
+
+  const topicKo = TOPIC_KO[classification.topic] || classification.topic;
+  const diffKo = DIFFICULTY_KO[classification.difficulty] || classification.difficulty;
+
+  const lines = [];
+  lines.push(`이 문제는 ${topicKo} 영역의 ${diffKo} 난도 문제입니다.`);
+  if (classification.needs_casework) {
+    lines.push('경우 분석(case analysis)이 필요합니다.');
+  }
+  if (classification.is_multi_part) {
+    lines.push('여러 소문제로 나뉜 문제입니다.');
+  }
+  if (decomposition && decomposition.length > 0) {
+    lines.push('');
+    lines.push('다음 순서로 풀이를 진행하겠습니다:');
+    decomposition.forEach((step, i) => {
+      lines.push(`${i + 1}. ${step}`);
+    });
+  }
+  lines.push('');
+  lines.push('잠시만 기다려주세요...');
+  lines.push('');
+
+  const text = lines.join('\n') + '\n';
+  try {
+    res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
+  } catch (writeErr) {
+    console.warn('[phase3-structural] write failed:', writeErr.message || writeErr);
+  }
+
+  const ms = Date.now() - t0;
+  console.log(`[phase3-structural] done in ${ms}ms — streamed ${text.length} chars`);
+}
+
+// ── Phase 2: warm-start solver ─────────────────────────────────────────────
+// o4-mini with reasoning_effort: "medium". Runs in parallel with classify /
+// Wolfram / decompose so the heaviest call starts as early as possible. No
+// Wolfram grounding here (Wolfram is concurrent); the verifier in Phase 5
+// catches errors and the retry path adds Wolfram context if needed.
+async function warmStartSolver(problemText) {
+  const t0 = Date.now();
+  console.log('[phase2-warmstart] start (o4-mini, reasoning_effort: medium)');
+
+  let solution = null;
+  try {
+    const response = await openai.chat.completions.create(
+      {
+        model: 'o4-mini',
+        max_completion_tokens: 16000,
+        reasoning_effort: 'medium',
+        messages: [
+          { role: 'system', content: SOLVER_PROMPT },
+          { role: 'user', content: `Problem:\n${problemText}\n\nProduce a rigorous step-by-step solution. Double-check your work.` }
+        ]
+      },
+      { timeout: 120000 }
+    );
+    solution = response.choices[0]?.message?.content || '';
+  } catch (err) {
+    console.warn('[phase2-warmstart] failed:', err.message || err);
+  }
+
+  const ms = Date.now() - t0;
+  if (solution) {
+    console.log(`[phase2-warmstart] done in ${ms}ms — solution length: ${solution.length} chars`);
+  } else {
+    console.log(`[phase2-warmstart] done in ${ms}ms — no solution (will fall back to runSolver in Phase 4)`);
+  }
+  return solution;
 }
 
 // ── Phase 3: Wolfram Alpha lookup ──────────────────────────────────────────
@@ -337,16 +498,22 @@ Rules:
 - Output raw rigorous mathematics only, no explanation formatting yet`;
 
 // runSolver — non-streaming. Returns the raw solution text.
-// Called only on the hard/olympiad path, so token budget is sized for that.
-async function runSolver(problemText, wolframAnswer, model) {
+// `effort` controls reasoning_effort for o-series reasoning models.
+// `retryContext` is an optional verifier/consistency note prepended to the
+// user message when re-solving after a failure.
+async function runSolver(problemText, wolframAnswer, model, effort = 'medium', retryContext = null) {
   const t0 = Date.now();
   const isReasoningModel = /^(o3|o3-mini|o4-mini)$/.test(model);
-  const effortLevel = isReasoningModel ? 'high' : 'n/a';
-  console.log(`[phase4-solver] start (model: ${model}, reasoning_effort: ${effortLevel})`);
+  const effortLevel = isReasoningModel ? effort : 'n/a';
+  console.log(`[phase4-solver] start (model: ${model}, reasoning_effort: ${effortLevel}${retryContext ? ', retry: yes' : ''})`);
 
-  const userContent = wolframAnswer
+  const baseUserContent = wolframAnswer
     ? `Problem:\n${problemText}\n\nThe correct final answer is: ${wolframAnswer}\n\nShow the complete working that arrives at this answer. Never produce a solution that contradicts this answer. Produce a rigorous step-by-step solution.`
     : `Problem:\n${problemText}\n\nProduce a rigorous step-by-step solution. Double-check your work.`;
+
+  const userContent = retryContext
+    ? `${retryContext}\n\n${baseUserContent}`
+    : baseUserContent;
 
   const params = {
     model,
@@ -356,11 +523,11 @@ async function runSolver(problemText, wolframAnswer, model) {
     ]
   };
   if (isReasoningModel) {
-    // Reasoning models: no temperature, use max_completion_tokens, ask for high-effort thinking.
+    // Reasoning models: no temperature, use max_completion_tokens.
     params.max_completion_tokens = 16000;
-    params.reasoning_effort = 'high';
+    params.reasoning_effort = effort;
   } else {
-    // Non-reasoning gpt-4o fallback: keep its temperature, scale tokens for hard problems.
+    // Non-reasoning gpt-4o fallback.
     params.max_tokens = 16000;
     params.temperature = 0.2;
   }
@@ -370,6 +537,139 @@ async function runSolver(problemText, wolframAnswer, model) {
   const ms = Date.now() - t0;
   console.log(`[phase4-solver] done in ${ms}ms — solution length: ${solution.length} chars`);
   return solution;
+}
+
+// ── Phase 5: verifier ──────────────────────────────────────────────────────
+// Non-streaming gpt-4o verification of a raw solver solution. Returns
+// { ok: bool, reason: string }. ok=true only if the model responds with the
+// literal token "VERIFIED" (case-insensitive, possibly with surrounding
+// whitespace). Otherwise the response is treated as the error explanation.
+async function verifySolution(problemText, rawSolution) {
+  const t0 = Date.now();
+  console.log('[phase5-verifier] start');
+
+  let ok = false;
+  let reason = '';
+
+  try {
+    const response = await openai.chat.completions.create(
+      {
+        model: 'gpt-4o',
+        max_tokens: 2000,
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a strict mathematical verifier. Check the provided solution against the original problem for: every algebraic step, domain restrictions, edge cases, whether substituting the final answer back satisfies the original equation, missing roots, invalid transformations, and sign errors. If everything is correct, respond with ONLY the single word VERIFIED (uppercase, nothing else). If anything is wrong, respond with a detailed explanation of the error(s) — what is wrong, where, and why. Do not say "VERIFIED" partially or as part of any other text.'
+          },
+          {
+            role: 'user',
+            content: `Original problem:\n${problemText}\n\nSolution to verify:\n${rawSolution}`
+          }
+        ]
+      },
+      { timeout: 60000 }
+    );
+    const raw = (response.choices[0]?.message?.content || '').trim();
+    if (/^VERIFIED\.?$/i.test(raw)) {
+      ok = true;
+      reason = '';
+    } else {
+      ok = false;
+      reason = raw;
+    }
+  } catch (err) {
+    console.warn('[phase5-verifier] failed (treating as VERIFIED to avoid blocking):', err.message || err);
+    ok = true; // verifier failure should not block the response — fail open
+    reason = `verifier-error: ${err.message || err}`;
+  }
+
+  const ms = Date.now() - t0;
+  console.log(`[phase5-verifier] done in ${ms}ms — ok: ${ok}${reason ? `, reason: ${JSON.stringify(reason.slice(0, 200))}` : ''}`);
+  return { ok, reason };
+}
+
+// ── Phase 6: alternative-strategy solver (olympiad only) ───────────────────
+// Solves the problem with an explicit instruction to use a different method
+// (e.g. geometric vs. algebraic). Used to cross-check the primary solution
+// for olympiad problems.
+async function alternativeStrategySolver(problemText, wolframAnswer) {
+  const t0 = Date.now();
+  console.log('[phase6-alt] start (o4-mini, reasoning_effort: medium, alternative strategy)');
+
+  const wolframLine = wolframAnswer
+    ? `\n\nThe correct final answer is: ${wolframAnswer}. Your solution must arrive at this answer.`
+    : '';
+  const userContent = `Problem:\n${problemText}${wolframLine}\n\nSolve this problem using an ALTERNATIVE METHOD different from the most obvious one. If the problem is naturally algebraic, try a geometric/graphical interpretation. If naturally calculus, try elementary inequalities. If naturally direct, try substitution or transformation. The goal is a fully independent path to the same final answer.`;
+
+  let solution = null;
+  try {
+    const response = await openai.chat.completions.create(
+      {
+        model: 'o4-mini',
+        max_completion_tokens: 16000,
+        reasoning_effort: 'medium',
+        messages: [
+          { role: 'system', content: SOLVER_PROMPT },
+          { role: 'user', content: userContent }
+        ]
+      },
+      { timeout: 120000 }
+    );
+    solution = response.choices[0]?.message?.content || '';
+  } catch (err) {
+    console.warn('[phase6-alt] failed:', err.message || err);
+  }
+
+  const ms = Date.now() - t0;
+  console.log(`[phase6-alt] done in ${ms}ms — solution length: ${solution ? solution.length : 0} chars`);
+  return solution;
+}
+
+// ── Phase 6: compare two solutions ─────────────────────────────────────────
+// Asks gpt-4o-mini whether two solutions arrive at the same final answer.
+// Returns true on match (or on comparison failure — fail-permissive so we
+// don't pointlessly escalate).
+async function compareAnswers(solutionA, solutionB) {
+  const t0 = Date.now();
+  console.log('[phase6-compare] start');
+
+  if (!solutionA || !solutionB) {
+    console.log(`[phase6-compare] done in 0ms — one solution missing, treating as match`);
+    return true;
+  }
+
+  let same = true;
+  try {
+    const response = await openai.chat.completions.create(
+      {
+        model: 'gpt-4o-mini',
+        max_tokens: 10,
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You compare two math solutions and decide whether they arrive at the same final answer (numerical value, set of values, or expression). Respond with ONLY "YES" or "NO". No prose, no punctuation.'
+          },
+          {
+            role: 'user',
+            content: `Solution A:\n${solutionA}\n\n---\n\nSolution B:\n${solutionB}`
+          }
+        ]
+      },
+      { timeout: 30000 }
+    );
+    const verdict = (response.choices[0]?.message?.content || '').trim().toUpperCase();
+    same = !/^NO\b/.test(verdict);
+  } catch (err) {
+    console.warn('[phase6-compare] failed (treating as match):', err.message || err);
+  }
+
+  const ms = Date.now() - t0;
+  console.log(`[phase6-compare] done in ${ms}ms — match: ${same}`);
+  return same;
 }
 
 // streamTutor — streaming. Reformats raw solution into the existing 존댓말
@@ -436,6 +736,14 @@ router.post('/message', async (req, res) => {
     res.socket?.setTimeout(120000);
     res.flushHeaders();
 
+    // ── Phase 0: instant SSE acknowledgement ──────────────────────────────
+    // Sent before any OCR / classification / Wolfram / solver work begins so
+    // the user sees activity within ~50ms of the request arriving.
+    const phase0t0 = Date.now();
+    console.log('[phase0-instant] start');
+    res.write(`data: ${JSON.stringify({ chunk: '문제를 분석하고 있습니다...\n\n' })}\n\n`);
+    console.log(`[phase0-instant] done in ${Date.now() - phase0t0}ms — sent acknowledgement chunk`);
+
     const basePrompt = buildSystemPrompt(grade, weakTopics);
     const systemPrompt = langInstruction + '\n\n' + basePrompt;
 
@@ -454,8 +762,12 @@ router.post('/message', async (req, res) => {
         try {
           const latex = await ocrExtract(solveMessages[i]);
           if (latex) {
+            const normalized = normalizeLatex(latex);
+            if (normalized !== latex) {
+              console.log(`[phase1-normalize] adjusted: ${JSON.stringify(normalized.slice(0, 200))}`);
+            }
             const { imageBase64, imageMimeType, ...rest } = solveMessages[i];
-            solveMessages[i] = { ...rest, content: latex };
+            solveMessages[i] = { ...rest, content: normalized };
           } else {
             console.warn(`[phase1-ocr] empty extraction for message ${i} — keeping original image`);
           }
@@ -477,35 +789,89 @@ router.post('/message', async (req, res) => {
       console.log('[router] non-math input — direct streaming, skipping classify/Wolfram/solver');
       await streamOpenAI(systemPrompt, solveMessages, res, 'gpt-4o');
     } else {
-      // ── Phase 2: classify ───────────────────────────────────────────────
-      const { topic, difficulty } = await classifyProblem(problemText);
+      // ── Phase 2: parallel intelligence layer ───────────────────────────
+      // classify + Wolfram + decompose + warmStartSolver run concurrently.
+      // Each helper internally swallows its own errors (returns null/[]/null
+      // on failure) so Promise.all never rejects.
+      const phase2t0 = Date.now();
+      console.log('[phase2-parallel] start — classify + wolfram + decompose + warmStart');
+      const [classification, wolframAnswer, decomposition, warmSolution] = await Promise.all([
+        classifyProblem(problemText),
+        wolframLookup(problemText),
+        decomposeProblem(problemText),
+        warmStartSolver(problemText)
+      ]);
+      const { topic, difficulty, needs_casework, is_multi_part } = classification;
+      console.log(`[phase2-parallel] done in ${Date.now() - phase2t0}ms — topic=${topic} difficulty=${difficulty} casework=${needs_casework} multi_part=${is_multi_part} wolfram=${wolframAnswer ? 'yes' : 'no'} decomp=${decomposition.length} warm=${warmSolution ? 'yes' : 'no'}`);
 
-      // ── Phase 3: Wolfram lookup ─────────────────────────────────────────
-      const wolframAnswer = await wolframLookup(problemText);
+      // ── Phase 3: safe early streaming ───────────────────────────────────
+      await streamStructuralAnalysis(res, classification, decomposition);
 
-      // ── Phase 5: route by classified difficulty ─────────────────────────
-      const isHardOrOlympiad = difficulty === 'hard' || difficulty === 'olympiad';
-      const solverModel = isHardOrOlympiad ? 'o4-mini' : 'gpt-4o';
-      console.log(`[router] topic=${topic} difficulty=${difficulty} solverModel=${solverModel} path=${isHardOrOlympiad ? 'two-pass' : 'streaming'} wolfram=${wolframAnswer ? 'yes' : 'no'}`);
-
-      if (isHardOrOlympiad) {
-        // Hard/olympiad: rigorous solver (non-streaming) → tutor reformat (streaming).
-        let rawSolution;
+      // ── Phase 4: primary solver ─────────────────────────────────────────
+      // Use the warm-start solution from Phase 2 if it completed; otherwise
+      // run runSolver now (medium effort, with Wolfram grounding).
+      let rawSolution = warmSolution;
+      if (!rawSolution) {
+        console.log('[phase4-solver] warm start unavailable — running solver now');
         try {
-          rawSolution = await runSolver(problemText, wolframAnswer, solverModel);
+          rawSolution = await runSolver(problemText, wolframAnswer, 'o4-mini', 'medium');
         } catch (solverErr) {
-          console.warn('[phase4-solver] reasoning model failed, falling back to gpt-4o:', solverErr.message || solverErr);
-          rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o');
+          console.warn('[phase4-solver] o4-mini failed, falling back to gpt-4o:', solverErr.message || solverErr);
+          try {
+            rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium');
+          } catch (fallbackErr) {
+            console.error('[phase4-solver] gpt-4o fallback also failed:', fallbackErr.message || fallbackErr);
+            rawSolution = '';
+          }
         }
+      } else {
+        console.log('[phase4-solver] using warm-start solution from Phase 2');
+      }
+
+      // ── Phase 6: olympiad self-consistency (runs BEFORE verifier so a
+      // disagreement can drive a high-effort retry that the verifier then
+      // checks) ──────────────────────────────────────────────────────────
+      if (difficulty === 'olympiad' && rawSolution) {
+        const altSolution = await alternativeStrategySolver(problemText, wolframAnswer);
+        const sameAnswer = await compareAnswers(rawSolution, altSolution);
+        if (!sameAnswer && altSolution) {
+          console.warn('[phase6-consistency] solutions disagree — escalating to high effort with both as context');
+          const retryNote = `You produced two solutions that disagree on the final answer:\n\n--- Solution A (primary) ---\n${rawSolution}\n\n--- Solution B (alternative method) ---\n${altSolution}\n\nResolve the disagreement and produce the single correct solution.`;
+          try {
+            rawSolution = await runSolver(problemText, wolframAnswer, 'o4-mini', 'high', retryNote);
+          } catch (e) {
+            console.warn('[phase6-consistency] high-effort retry failed, keeping primary solution:', e.message || e);
+          }
+        }
+      }
+
+      // ── Phase 5: verifier (medium / hard / olympiad only) ───────────────
+      if (difficulty !== 'easy' && rawSolution) {
+        const verification = await verifySolution(problemText, rawSolution);
+        if (!verification.ok) {
+          console.warn('[phase5-verifier] verification failed — retrying solver with high effort');
+          const retryNote = `Your previous solution failed verification because:\n${verification.reason}\n\nSolve the problem again carefully, fixing these specific errors.`;
+          try {
+            rawSolution = await runSolver(problemText, wolframAnswer, 'o4-mini', 'high', retryNote);
+          } catch (retryErr) {
+            console.warn('[phase5-verifier] high-effort retry failed, falling back to gpt-4o:', retryErr.message || retryErr);
+            try {
+              rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium', retryNote);
+            } catch (gptErr) {
+              console.error('[phase5-verifier] all retries failed, keeping unverified solution:', gptErr.message || gptErr);
+            }
+          }
+        }
+      }
+
+      // ── Phase 7+8: tutor formatting and stream final answer ─────────────
+      if (rawSolution) {
         await streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res);
       } else {
-        // Easy/medium: single combined streaming call. If Wolfram returned an
-        // answer, prepend it to the system prompt as ground truth.
-        let groundedPrompt = systemPrompt;
-        if (wolframAnswer) {
-          groundedPrompt += `\n\nThe correct final answer is: ${wolframAnswer}\nShow the complete working that arrives at this answer. Never produce a solution that contradicts this answer.`;
-        }
-        await streamOpenAI(groundedPrompt, solveMessages, res, 'gpt-4o');
+        // No solution at all — emit a minimal apology so the user gets a
+        // terminal message instead of an open SSE stream.
+        console.error('[router] no rawSolution available — emitting apology');
+        res.write(`data: ${JSON.stringify({ chunk: '죄송합니다. 일시적인 오류로 풀이를 생성하지 못했습니다. 다시 시도해주세요.' })}\n\n`);
       }
     }
 

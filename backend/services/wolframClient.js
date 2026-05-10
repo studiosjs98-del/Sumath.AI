@@ -1,16 +1,16 @@
 // Wolfram Alpha Short Answers API client.
 // Returns the raw answer string on success, null on failure / no result.
-// Configure with WOLFRAM_API_KEY env var. Never throws — failures resolve to
+// Configure with WOLFRAM_APP_ID env var. Never throws — failures resolve to
 // null so callers can fall back to LLM-only solving.
 const https = require('https');
 
 let warned = false;
 
 function getApiKey() {
-  const key = process.env.WOLFRAM_API_KEY;
+  const key = process.env.WOLFRAM_APP_ID;
   if (!key) {
     if (!warned) {
-      console.error('❌ WOLFRAM_API_KEY is not set — Wolfram lookups will be skipped.');
+      console.error('❌ WOLFRAM_APP_ID is not set — Wolfram lookups will be skipped.');
       warned = true;
     }
     return null;
