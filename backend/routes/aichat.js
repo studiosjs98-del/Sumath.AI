@@ -17,6 +17,39 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const withTimeout = (promise, ms, fallback = null) =>
   Promise.race([promise, sleep(ms).then(() => fallback)]);
 
+// ── Token budgets per difficulty ───────────────────────────────────────────
+// Applied to every solver / tutor / warm-start call so reasoning models have
+// enough room to actually finish complex case analyses. Helpers like
+// classify / decompose / verifier keep their own small caps — they're
+// micro-tasks, not solving.
+const MAX_TOKENS = {
+  easy: 4000,
+  medium: 8000,
+  hard: 16000,
+  olympiad: 32000
+};
+const DEFAULT_MAX_TOKENS = 16000;
+const tokensFor = (difficulty) =>
+  (difficulty && MAX_TOKENS[difficulty]) || DEFAULT_MAX_TOKENS;
+
+// ── Incomplete-solution signal phrases ─────────────────────────────────────
+// If a raw solver output ends without a final answer and contains any of
+// these phrases, we trigger a one-shot solver retry to complete the work.
+const INCOMPLETE_SIGNALS = [
+  '여기까지',
+  'to be continued',
+  '계속',
+  'therefore we need to',
+  '따라서 우리는',
+  'we still need to check',
+  '아직 확인이 필요'
+];
+const hasIncompleteSignal = (text) => {
+  if (!text || typeof text !== 'string') return false;
+  const lower = text.toLowerCase();
+  return INCOMPLETE_SIGNALS.some(sig => lower.includes(sig.toLowerCase()));
+};
+
 function extractJson(text) {
   if (!text || typeof text !== 'string') return null;
   const startArr = text.indexOf('[');
@@ -82,7 +115,14 @@ Rules:
 - Never skip a case even if it seems obvious
 - Never state a conclusion without showing the verification
 - The explanation should feel like a tutor telling a story where each step answers the natural question a student would ask next
-- Match the depth and rigor of the MathGPT explanation provided as reference`;
+- Match the depth and rigor of the MathGPT explanation provided as reference
+
+COMPLETION RULES — these are mandatory:
+- Never truncate the solution
+- Every case that was opened must be closed with a result
+- The [ANSWER] tag must always appear at the end
+- If the raw solution you received is incomplete, state explicitly what the final answer is based on the work shown rather than leaving it open
+- A response without [ANSWER] is always wrong`;
 
 function buildSystemPrompt(grade, weakTopics) {
   const gradeStr = grade || '고등학교';
@@ -128,13 +168,13 @@ function buildOaiMessages(systemPrompt, messages) {
 }
 
 // Streaming path — gpt-4o-mini only
-async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini') {
+async function streamOpenAI(systemPrompt, messages, res, model = 'gpt-4o-mini', maxTokens = DEFAULT_MAX_TOKENS) {
   const oaiMessages = buildOaiMessages(systemPrompt, messages);
 
   const stream = await openai.chat.completions.create(
     {
       model,
-      max_tokens: 8000,
+      max_tokens: maxTokens,
       temperature: 0.4,
       stream: true,
       messages: oaiMessages,
@@ -331,16 +371,16 @@ async function decomposeProblem(problemText) {
 // it's only paid for on hard/olympiad. Runs without Wolfram grounding (the
 // route's wolfram lookup is concurrent); the background verifier catches
 // errors after the response is already streaming.
-async function warmStartSolver(problemText) {
+async function warmStartSolver(problemText, maxTokens = DEFAULT_MAX_TOKENS) {
   const t0 = Date.now();
-  console.log('[phase4-warmstart] start (o4-mini, reasoning_effort: medium)');
+  console.log(`[phase4-warmstart] start (o4-mini, reasoning_effort: medium, maxTokens: ${maxTokens})`);
 
   let solution = null;
   try {
     const response = await openai.chat.completions.create(
       {
         model: 'o4-mini',
-        max_completion_tokens: 16000,
+        max_completion_tokens: maxTokens,
         reasoning_effort: 'medium',
         messages: [
           { role: 'system', content: SOLVER_PROMPT },
@@ -447,17 +487,26 @@ Rules:
 - Always check every case systematically: what happens when the discriminant of each sub-problem is positive, zero, or negative
 - Always verify that root counts across equations add up to exactly the required number
 - Never output a final answer without substituting it back to verify
-- Output raw rigorous mathematics only, no explanation formatting yet`;
+- Output raw rigorous mathematics only, no explanation formatting yet
+
+COMPLETION RULES — these are mandatory:
+- Never stop mid-solution
+- Every case analysis must be completed to a final numerical or algebraic answer
+- After all cases are tested, always state which values of the parameter satisfy the condition
+- Always end with a clearly stated final answer
+- If you are running low on space, skip intermediate explanation but never skip the final answer
+- A solution that does not reach a final answer is wrong regardless of how correct the setup is`;
 
 // runSolver — non-streaming. Returns the raw solution text.
 // `effort` controls reasoning_effort for o-series reasoning models.
 // `retryContext` is an optional verifier/consistency note prepended to the
 // user message when re-solving after a failure.
-async function runSolver(problemText, wolframAnswer, model, effort = 'medium', retryContext = null) {
+// `maxTokens` is the per-difficulty token budget (DEFAULT_MAX_TOKENS = 16000).
+async function runSolver(problemText, wolframAnswer, model, effort = 'medium', retryContext = null, maxTokens = DEFAULT_MAX_TOKENS) {
   const t0 = Date.now();
   const isReasoningModel = /^(o3|o3-mini|o4-mini)$/.test(model);
   const effortLevel = isReasoningModel ? effort : 'n/a';
-  console.log(`[phase4-solver] start (model: ${model}, reasoning_effort: ${effortLevel}${retryContext ? ', retry: yes' : ''})`);
+  console.log(`[phase4-solver] start (model: ${model}, reasoning_effort: ${effortLevel}, maxTokens: ${maxTokens}${retryContext ? ', retry: yes' : ''})`);
 
   const baseUserContent = wolframAnswer
     ? `Problem:\n${problemText}\n\nThe correct final answer is: ${wolframAnswer}\n\nShow the complete working that arrives at this answer. Never produce a solution that contradicts this answer. Produce a rigorous step-by-step solution.`
@@ -476,11 +525,11 @@ async function runSolver(problemText, wolframAnswer, model, effort = 'medium', r
   };
   if (isReasoningModel) {
     // Reasoning models: no temperature, use max_completion_tokens.
-    params.max_completion_tokens = 16000;
+    params.max_completion_tokens = maxTokens;
     params.reasoning_effort = effort;
   } else {
     // Non-reasoning gpt-4o fallback.
-    params.max_tokens = 16000;
+    params.max_tokens = maxTokens;
     params.temperature = 0.2;
   }
 
@@ -546,9 +595,9 @@ async function verifySolution(problemText, rawSolution) {
 // Solves the problem with an explicit instruction to use a different method
 // (e.g. geometric vs. algebraic). Used to cross-check the primary solution
 // for olympiad problems.
-async function alternativeStrategySolver(problemText, wolframAnswer) {
+async function alternativeStrategySolver(problemText, wolframAnswer, maxTokens = MAX_TOKENS.olympiad) {
   const t0 = Date.now();
-  console.log('[phase6-alt] start (o4-mini, reasoning_effort: medium, alternative strategy)');
+  console.log(`[phase6-alt] start (o4-mini, reasoning_effort: medium, maxTokens: ${maxTokens}, alternative strategy)`);
 
   const wolframLine = wolframAnswer
     ? `\n\nThe correct final answer is: ${wolframAnswer}. Your solution must arrive at this answer.`
@@ -560,7 +609,7 @@ async function alternativeStrategySolver(problemText, wolframAnswer) {
     const response = await openai.chat.completions.create(
       {
         model: 'o4-mini',
-        max_completion_tokens: 16000,
+        max_completion_tokens: maxTokens,
         reasoning_effort: 'medium',
         messages: [
           { role: 'system', content: SOLVER_PROMPT },
@@ -625,11 +674,11 @@ async function compareAnswers(solutionA, solutionB) {
 }
 
 // streamTutor — streaming. Reformats raw solution into the existing 존댓말
-// step format and writes it as SSE chunks. Owns its own keep-alive timer to
-// match streamOpenAI's pattern.
-async function streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res) {
+// step format and writes it as SSE chunks. Accumulates the full output and
+// returns it so the route handler can post-check for the [ANSWER] tag.
+async function streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res, maxTokens = DEFAULT_MAX_TOKENS) {
   const t0 = Date.now();
-  console.log('[phase4-tutor] start');
+  console.log(`[phase4-tutor] start (maxTokens: ${maxTokens})`);
 
   const wolframLine = wolframAnswer ? `\n\nVerified answer (must match): ${wolframAnswer}` : '';
   const userContent = `Original problem:\n${problemText}\n\nRaw solution to reformat:\n${rawSolution}${wolframLine}\n\nReformat the raw solution into the standard tutor format described in the system prompt. Translate to friendly Korean 존댓말 (~습니다/~합니다) and use the 핵심 아이디어 / ① ② ③ / ④ 검산 / [ANSWER]value[/ANSWER] / 여기까지 괜찮아? structure exactly as shown in the example. Do not change any mathematical content or the final answer — translate and reformat only.`;
@@ -637,7 +686,7 @@ async function streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt
   const stream = await openai.chat.completions.create(
     {
       model: 'gpt-4o',
-      max_tokens: 16000,
+      max_tokens: maxTokens,
       temperature: 0.4,
       stream: true,
       messages: [
@@ -652,17 +701,68 @@ async function streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt
     try { res.write(': keepalive\n\n') } catch (_) { clearInterval(keepAliveTimer) }
   }, 15000);
 
+  let accumulated = '';
   try {
     for await (const chunk of stream) {
       const text = chunk.choices[0]?.delta?.content || '';
-      if (text) res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
+      if (text) {
+        accumulated += text;
+        res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
+      }
     }
   } finally {
     clearInterval(keepAliveTimer);
   }
 
   const ms = Date.now() - t0;
-  console.log(`[phase4-tutor] done in ${ms}ms`);
+  console.log(`[phase4-tutor] done in ${ms}ms — output length: ${accumulated.length} chars, has [ANSWER]: ${accumulated.includes('[ANSWER]')}`);
+  return accumulated;
+}
+
+// streamTutorCompletion — focused retry that streams ONLY the missing tail
+// of an incomplete tutor response. Same SSE / keep-alive pattern as
+// streamTutor; appended to the in-flight stream so the frontend renders it
+// continuously after the truncated original.
+async function streamTutorCompletion(rawSolution, res, maxTokens = DEFAULT_MAX_TOKENS) {
+  const t0 = Date.now();
+  console.log(`[phase4-tutor-completion] start (maxTokens: ${maxTokens})`);
+
+  const userContent = `The previous formatting attempt did not include a final answer.\nThe raw solution is: ${rawSolution}\nYour only job in this retry is to complete the solution and end with [ANSWER]value[/ANSWER]. Do not rewrite the whole explanation. Just complete it and add the final answer.`;
+
+  const stream = await openai.chat.completions.create(
+    {
+      model: 'gpt-4o',
+      max_tokens: maxTokens,
+      temperature: 0.2,
+      stream: true,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: userContent }
+      ]
+    },
+    { timeout: 120000 }
+  );
+
+  let keepAliveTimer = setInterval(() => {
+    try { res.write(': keepalive\n\n') } catch (_) { clearInterval(keepAliveTimer) }
+  }, 15000);
+
+  let accumulated = '';
+  try {
+    for await (const chunk of stream) {
+      const text = chunk.choices[0]?.delta?.content || '';
+      if (text) {
+        accumulated += text;
+        res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
+      }
+    }
+  } finally {
+    clearInterval(keepAliveTimer);
+  }
+
+  const ms = Date.now() - t0;
+  console.log(`[phase4-tutor-completion] done in ${ms}ms — output length: ${accumulated.length} chars, has [ANSWER]: ${accumulated.includes('[ANSWER]')}`);
+  return accumulated;
 }
 
 // ── Main route ───────────────────────────────────────────────────────────────
@@ -737,7 +837,7 @@ router.post('/message', async (req, res) => {
     const looksLikeMath = hasImage || !!lastText;
     if (!looksLikeMath || !problemText.trim()) {
       console.log(`[router] non-math input — direct streaming elapsed=${elapsed()}ms`);
-      await streamOpenAI(systemPrompt, solveMessages, res, 'gpt-4o');
+      await streamOpenAI(systemPrompt, solveMessages, res, 'gpt-4o', DEFAULT_MAX_TOKENS);
     } else {
       // ── Phase 2: launch background tasks (don't await) ────────────────
       // classify (1500ms), decompose (2000ms), wolfram (3000ms) all kicked
@@ -787,9 +887,17 @@ router.post('/message', async (req, res) => {
       await streamStructuralAnalysis(res, classification, decomposition);
       console.log(`[phase3-structural] streamed elapsed=${elapsed()}ms`);
 
+      // Per-difficulty token budget (shared by solver + tutor + warm-start).
+      const maxTokens = tokensFor(difficulty);
+      console.log(`[router] maxTokens=${maxTokens} (difficulty=${difficulty}) elapsed=${elapsed()}ms`);
+
       // ── Phase 4: solver — branch by path ──────────────────────────────
       let rawSolution = '';
       let wolframAnswer = null;
+      // Track which model+effort produced the final rawSolution so the
+      // incomplete-solver retry (FIX 5) can rerun the same configuration.
+      let solverModelUsed = 'gpt-4o';
+      let solverEffortUsed = 'medium';
 
       if (selectedPath === 'cheap') {
         // easy/medium: no warm-start. Wait for wolfram (already 3s-capped),
@@ -797,7 +905,9 @@ router.post('/message', async (req, res) => {
         wolframAnswer = await wolframPromise;
         console.log(`[phase4-solver] cheap path — gpt-4o elapsed=${elapsed()}ms wolfram=${wolframAnswer ? 'yes' : 'no'}`);
         try {
-          rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium');
+          rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium', null, maxTokens);
+          solverModelUsed = 'gpt-4o';
+          solverEffortUsed = 'medium';
         } catch (e) {
           console.error(`[phase4-solver] gpt-4o failed elapsed=${elapsed()}ms:`, e.message || e);
         }
@@ -806,7 +916,7 @@ router.post('/message', async (req, res) => {
         // remaining time-to-budget. Wolfram is fetched in parallel.
         const remainingForWarm = Math.max(1000, thinkingBudget - elapsed());
         console.log(`[phase4-warmstart] launching o4-mini medium remainingBudget=${remainingForWarm}ms elapsed=${elapsed()}ms`);
-        const warmPromise = withTimeout(warmStartSolver(problemText), remainingForWarm);
+        const warmPromise = withTimeout(warmStartSolver(problemText, maxTokens), remainingForWarm);
 
         const [warmResult, wResult] = await Promise.all([warmPromise, wolframPromise]);
         wolframAnswer = wResult;
@@ -814,13 +924,29 @@ router.post('/message', async (req, res) => {
         if (warmResult) {
           console.log(`[phase4-warmstart] succeeded — using warm solution elapsed=${elapsed()}ms`);
           rawSolution = warmResult;
+          solverModelUsed = 'o4-mini';
+          solverEffortUsed = 'medium';
         } else {
           console.warn(`[timeout] warm-start missed deadline — using fast solver elapsed=${elapsed()}ms`);
           try {
-            rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium');
+            rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium', null, maxTokens);
+            solverModelUsed = 'gpt-4o';
+            solverEffortUsed = 'medium';
           } catch (e) {
             console.error(`[phase4-fastfallback] gpt-4o failed elapsed=${elapsed()}ms:`, e.message || e);
           }
+        }
+      }
+
+      // ── FIX 5: incomplete-solver detection + one-shot retry ────────────
+      if (rawSolution && hasIncompleteSignal(rawSolution)) {
+        console.log(`[solver-retry] incomplete solution detected — completing. elapsed=${elapsed()}ms`);
+        const continueNote = `Your previous solution was incomplete. It set up the cases but did not finish the analysis.\nContinue from where you left off and complete every case to reach the final answer.\nPrevious work: ${rawSolution}`;
+        try {
+          const completed = await runSolver(problemText, wolframAnswer, solverModelUsed, solverEffortUsed, continueNote, maxTokens);
+          if (completed) rawSolution = completed;
+        } catch (e) {
+          console.warn(`[solver-retry] retry failed (keeping original):`, e.message || e);
         }
       }
 
@@ -843,7 +969,7 @@ router.post('/message', async (req, res) => {
       if (difficulty === 'olympiad' && rawSolution) {
         const solutionSnapshot = rawSolution;
         const wolframSnapshot = wolframAnswer;
-        alternativeStrategySolver(problemText, wolframSnapshot)
+        alternativeStrategySolver(problemText, wolframSnapshot, maxTokens)
           .then(async (altSolution) => {
             if (!altSolution) return;
             const same = await compareAnswers(solutionSnapshot, altSolution);
@@ -859,8 +985,21 @@ router.post('/message', async (req, res) => {
       // ── Phase 7+8: tutor formatting and stream final answer ───────────
       if (rawSolution) {
         console.log(`[phase4-tutor] starting stream elapsed=${elapsed()}ms`);
-        await streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res);
+        const tutorOutput = await streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res, maxTokens);
         console.log(`[phase4-tutor] stream complete elapsed=${elapsed()}ms`);
+
+        // ── FIX 4: incomplete-tutor detection + completion retry ─────────
+        // If the tutor pass finished without emitting [ANSWER], stream a
+        // focused completion that appends the missing tail to the same SSE
+        // connection.
+        if (!tutorOutput.includes('[ANSWER]')) {
+          console.log(`[completion-retry] response was incomplete — retrying tutor pass elapsed=${elapsed()}ms`);
+          try {
+            await streamTutorCompletion(rawSolution, res, maxTokens);
+          } catch (e) {
+            console.warn(`[completion-retry] failed:`, e.message || e);
+          }
+        }
       } else {
         console.error(`[router] no rawSolution available — emitting apology elapsed=${elapsed()}ms`);
         res.write(`data: ${JSON.stringify({ chunk: '죄송합니다. 일시적인 오류로 풀이를 생성하지 못했습니다. 다시 시도해주세요.' })}\n\n`);
