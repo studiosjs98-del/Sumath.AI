@@ -6,6 +6,17 @@ const { getLanguageInstruction } = require('../utils/language');
 
 const router = express.Router();
 
+// ── Time-budget helpers ────────────────────────────────────────────────────
+// `sleep(ms)` resolves after the given duration. `withTimeout(promise, ms,
+// fallback)` races a promise against a deadline; on timeout it returns the
+// fallback (default null) and the underlying promise keeps running detached
+// (its eventual resolution is discarded). Used to enforce per-phase budgets
+// so a slow OCR / classify / Wolfram / solver call cannot block the whole
+// pipeline past the visible-generation deadline.
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const withTimeout = (promise, ms, fallback = null) =>
+  Promise.race([promise, sleep(ms).then(() => fallback)]);
+
 function extractJson(text) {
   if (!text || typeof text !== 'string') return null;
   const startArr = text.indexOf('[');
@@ -315,6 +326,43 @@ async function decomposeProblem(problemText) {
   return steps;
 }
 
+// ── Phase 4: warm-start solver (hard / olympiad only) ─────────────────────
+// o4-mini with reasoning_effort: "medium". Launched after classification so
+// it's only paid for on hard/olympiad. Runs without Wolfram grounding (the
+// route's wolfram lookup is concurrent); the background verifier catches
+// errors after the response is already streaming.
+async function warmStartSolver(problemText) {
+  const t0 = Date.now();
+  console.log('[phase4-warmstart] start (o4-mini, reasoning_effort: medium)');
+
+  let solution = null;
+  try {
+    const response = await openai.chat.completions.create(
+      {
+        model: 'o4-mini',
+        max_completion_tokens: 16000,
+        reasoning_effort: 'medium',
+        messages: [
+          { role: 'system', content: SOLVER_PROMPT },
+          { role: 'user', content: `Problem:\n${problemText}\n\nProduce a rigorous step-by-step solution. Double-check your work.` }
+        ]
+      },
+      { timeout: 120000 }
+    );
+    solution = response.choices[0]?.message?.content || '';
+  } catch (err) {
+    console.warn('[phase4-warmstart] failed:', err.message || err);
+  }
+
+  const ms = Date.now() - t0;
+  if (solution) {
+    console.log(`[phase4-warmstart] done in ${ms}ms — solution length: ${solution.length} chars`);
+  } else {
+    console.log(`[phase4-warmstart] done in ${ms}ms — no solution`);
+  }
+  return solution;
+}
+
 // ── Phase 3: safe early streaming ──────────────────────────────────────────
 // Streams a structural-analysis intro (topic + approach + ordered subproblems)
 // to the client immediately after Phase 2 completes, so the user sees content
@@ -335,27 +383,31 @@ async function streamStructuralAnalysis(res, classification, decomposition) {
   const t0 = Date.now();
   console.log('[phase3-structural] start');
 
-  const topicKo = TOPIC_KO[classification.topic] || classification.topic;
-  const diffKo = DIFFICULTY_KO[classification.difficulty] || classification.difficulty;
-
+  const knownTopic = classification && classification.topic && classification.topic !== 'unknown';
   const lines = [];
-  lines.push(`이 문제는 ${topicKo} 영역의 ${diffKo} 난도 문제입니다.`);
-  if (classification.needs_casework) {
-    lines.push('경우 분석(case analysis)이 필요합니다.');
+
+  // 핵심 아이디어 callout — one honest sentence summarizing topic + approach.
+  lines.push('핵심 아이디어');
+  if (!knownTopic) {
+    lines.push('이 문제의 구조를 분석하고 있습니다.');
+  } else {
+    const topicKo = TOPIC_KO[classification.topic] || classification.topic;
+    const diffKo = DIFFICULTY_KO[classification.difficulty] || classification.difficulty;
+    let summary = `이 문제는 ${topicKo} 영역의 ${diffKo} 난도 문제입니다.`;
+    if (classification.needs_casework) summary += ' 경우 분석이 필요합니다.';
+    if (classification.is_multi_part) summary += ' 여러 소문제로 구성되어 있습니다.';
+    lines.push(summary);
   }
-  if (classification.is_multi_part) {
-    lines.push('여러 소문제로 나뉜 문제입니다.');
-  }
+  lines.push('');
+
+  // Approach derived from decomposition (only if we have real content).
   if (decomposition && decomposition.length > 0) {
-    lines.push('');
     lines.push('다음 순서로 풀이를 진행하겠습니다:');
     decomposition.forEach((step, i) => {
       lines.push(`${i + 1}. ${step}`);
     });
+    lines.push('');
   }
-  lines.push('');
-  lines.push('잠시만 기다려주세요...');
-  lines.push('');
 
   const text = lines.join('\n') + '\n';
   try {
@@ -615,11 +667,16 @@ async function streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt
 
 // ── Main route ───────────────────────────────────────────────────────────────
 router.post('/message', async (req, res) => {
-  // Route-level keep-alive — fires every 15s for the whole request lifetime so
-  // the non-streaming o3-mini path (which sits silent on OpenAI for 30-90s)
-  // doesn't get its SSE connection reaped by Render/proxy idle timeouts.
-  // streamOpenAI also runs its own keep-alive while it's active; the two are
-  // additive and harmless.
+  // ── Time budget bookkeeping ──────────────────────────────────────────────
+  // requestStart is the very first thing recorded. `elapsed()` returns ms
+  // since the request entered this handler — used for budget enforcement
+  // and visible in every phase boundary log.
+  const requestStart = Date.now();
+  const elapsed = () => Date.now() - requestStart;
+
+  // Route-level keep-alive — fires every 15s so background promises (e.g.
+  // verifier launched fire-and-forget) and slow streams cannot have the SSE
+  // connection reaped by Render/proxy idle timeouts.
   const keepAlive = setInterval(() => {
     try { res.write(': keepalive\n\n') } catch (_) { clearInterval(keepAlive) }
   }, 15000);
@@ -637,30 +694,25 @@ router.post('/message', async (req, res) => {
     res.flushHeaders();
 
     // ── Phase 0: instant SSE acknowledgement ──────────────────────────────
-    // Sent before any OCR / classification / Wolfram / solver work begins so
-    // the user sees activity within ~50ms of the request arriving.
-    const phase0t0 = Date.now();
-    console.log('[phase0-instant] start');
+    console.log(`[phase0-instant] start elapsed=${elapsed()}ms`);
     res.write(`data: ${JSON.stringify({ chunk: '문제를 분석하고 있습니다...\n\n' })}\n\n`);
-    console.log(`[phase0-instant] done in ${Date.now() - phase0t0}ms — sent acknowledgement chunk`);
+    console.log(`[phase0-instant] done elapsed=${elapsed()}ms`);
 
     const basePrompt = buildSystemPrompt(grade, weakTopics);
     const systemPrompt = langInstruction + '\n\n' + basePrompt;
 
-    // Working copy. Phase 1 OCR will replace any image-bearing message's
-    // content with extracted LaTeX in this copy; original `messages` untouched.
     const solveMessages = messages.slice();
     const hasImage = solveMessages.some(m => m.imageBase64);
     const lastText = extractMathQuery(messages) || '';
 
-    console.log('[router] start — image:', hasImage, 'lastText length:', lastText.length);
+    console.log(`[router] start image=${hasImage} lastText=${lastText.length} elapsed=${elapsed()}ms`);
 
-    // ── Phase 1: OCR ──────────────────────────────────────────────────────
+    // ── Phase 1: OCR + normalization (per-image 2000ms timeout) ───────────
     if (hasImage) {
       for (let i = 0; i < solveMessages.length; i++) {
         if (!solveMessages[i].imageBase64) continue;
         try {
-          const latex = await ocrExtract(solveMessages[i]);
+          const latex = await withTimeout(ocrExtract(solveMessages[i]), 2000);
           if (latex) {
             const normalized = normalizeLatex(latex);
             if (normalized !== latex) {
@@ -669,130 +721,153 @@ router.post('/message', async (req, res) => {
             const { imageBase64, imageMimeType, ...rest } = solveMessages[i];
             solveMessages[i] = { ...rest, content: normalized };
           } else {
-            console.warn(`[phase1-ocr] empty extraction for message ${i} — keeping original image`);
+            console.warn(`[phase1-ocr] empty/timeout for message ${i} elapsed=${elapsed()}ms — keeping original image`);
           }
         } catch (ocrErr) {
-          console.warn(`[phase1-ocr] failed for message ${i} — keeping original image:`, ocrErr.message || ocrErr);
+          console.warn(`[phase1-ocr] failed for message ${i} elapsed=${elapsed()}ms:`, ocrErr.message || ocrErr);
         }
       }
+      console.log(`[phase1-ocr] all images processed elapsed=${elapsed()}ms`);
     }
 
-    // Latest user message's content (post-OCR if it was an image).
     const lastUser = [...solveMessages].reverse().find(m => m.role === 'user');
     const problemText = (typeof lastUser?.content === 'string' ? lastUser.content : '') || '';
 
-    // Casual / non-math input → skip classify + Wolfram and stream directly.
-    // Preserves the fast-path for chitchat without paying for classification
-    // and a 15s Wolfram timeout on inputs that aren't math problems.
+    // Casual / non-math input → skip classify + Wolfram + solver, stream directly.
     const looksLikeMath = hasImage || !!lastText;
     if (!looksLikeMath || !problemText.trim()) {
-      console.log('[router] non-math input — direct streaming, skipping classify/Wolfram/solver');
+      console.log(`[router] non-math input — direct streaming elapsed=${elapsed()}ms`);
       await streamOpenAI(systemPrompt, solveMessages, res, 'gpt-4o');
     } else {
-      // ── Phase 2 / Stage 1: cheap parallel layer ────────────────────────
-      // classify + Wolfram + decompose run concurrently. The expensive
-      // o4-mini warm-start has been removed — solver model is now picked
-      // AFTER classification so easy/medium problems never pay for o4-mini.
-      // Each helper internally try/catches and returns null/[]/null on
-      // failure so Promise.all never rejects.
-      const phase2t0 = Date.now();
-      console.log('[phase2-parallel] start — classify + wolfram + decompose');
-      const [classification, wolframAnswer, decomposition] = await Promise.all([
-        classifyProblem(problemText),
-        wolframLookup(problemText),
-        decomposeProblem(problemText)
-      ]);
-      const { topic, difficulty, needs_casework, is_multi_part } = classification;
-      console.log(`[phase2-parallel] done in ${Date.now() - phase2t0}ms — topic=${topic} difficulty=${difficulty} casework=${needs_casework} multi_part=${is_multi_part} wolfram=${wolframAnswer ? 'yes' : 'no'} decomp=${decomposition.length}`);
+      // ── Phase 2: launch background tasks (don't await) ────────────────
+      // classify (1500ms), decompose (2000ms), wolfram (3000ms) all kicked
+      // off concurrently. Warm-start is NOT launched here — it costs real
+      // money and only fires for hard/olympiad after classification.
+      console.log(`[phase2-launch] launching classify+decompose+wolfram elapsed=${elapsed()}ms`);
+      const classifyPromise = withTimeout(classifyProblem(problemText), 1500);
+      const decomposePromise = withTimeout(decomposeProblem(problemText), 2000);
+      const wolframPromise = withTimeout(wolframLookup(problemText), 3000);
 
-      // ── Stage 2: select solver path based on classification ────────────
-      // easy/medium → cheap (gpt-4o, no reasoning effort)
-      // hard       → moderate (o4-mini medium reasoning)
-      // olympiad   → full-stack (o4-mini medium + verifier + alt-strategy)
+      // ── Phase 3a: collect fast metadata (max ~2s, the larger of the two
+      //   inner timeouts) ────────────────────────────────────────────────
+      const [rawClassification, rawDecomposition] = await Promise.all([
+        classifyPromise,
+        decomposePromise
+      ]);
+      const classification = rawClassification || {
+        topic: 'unknown',
+        difficulty: 'hard',
+        needs_casework: false,
+        is_multi_part: false
+      };
+      const decomposition = rawDecomposition || [];
+      const { topic, difficulty } = classification;
+      console.log(`[phase2-meta] ready elapsed=${elapsed()}ms — topic=${topic} difficulty=${difficulty} decomp=${decomposition.length} ${rawClassification ? '' : '(classify timed out)'}`);
+
+      // ── Stage 2: select solver path ────────────────────────────────────
+      // easy/medium → cheap   (gpt-4o, no warm-start)
+      // hard        → moderate (warm-start o4-mini medium, 8s budget)
+      // olympiad    → full-stack (warm-start o4-mini medium, 12s budget)
       let selectedPath;
-      let solverModel;
-      let solverEffort;
+      let thinkingBudget;
       if (difficulty === 'easy' || difficulty === 'medium') {
         selectedPath = 'cheap';
-        solverModel = 'gpt-4o';
-        solverEffort = 'medium'; // ignored by gpt-4o (non-reasoning)
+        thinkingBudget = difficulty === 'easy' ? 3000 : 5000;
       } else if (difficulty === 'hard') {
         selectedPath = 'moderate';
-        solverModel = 'o4-mini';
-        solverEffort = 'medium';
+        thinkingBudget = 8000;
       } else {
-        // olympiad
         selectedPath = 'full-stack';
-        solverModel = 'o4-mini';
-        solverEffort = 'medium';
+        thinkingBudget = 12000;
       }
-      console.log(`[router] difficulty=${difficulty} topic=${topic} path=${selectedPath} wolfram=${wolframAnswer ? 'yes' : 'no'}`);
+      console.log(`[router] difficulty=${difficulty} topic=${topic} path=${selectedPath} budget=${thinkingBudget}ms elapsed=${elapsed()}ms`);
 
-      // ── Phase 3: safe early streaming ───────────────────────────────────
+      // ── Phase 3b: stream real structural analysis (honest, derived from
+      //   classification + decomposition) ──────────────────────────────────
       await streamStructuralAnalysis(res, classification, decomposition);
+      console.log(`[phase3-structural] streamed elapsed=${elapsed()}ms`);
 
-      // ── Phase 4: primary solver (never high effort on first attempt) ────
+      // ── Phase 4: solver — branch by path ──────────────────────────────
       let rawSolution = '';
-      try {
-        rawSolution = await runSolver(problemText, wolframAnswer, solverModel, solverEffort);
-      } catch (solverErr) {
-        console.warn(`[phase4-solver] ${solverModel} failed, falling back to gpt-4o:`, solverErr.message || solverErr);
+      let wolframAnswer = null;
+
+      if (selectedPath === 'cheap') {
+        // easy/medium: no warm-start. Wait for wolfram (already 3s-capped),
+        // then run gpt-4o directly.
+        wolframAnswer = await wolframPromise;
+        console.log(`[phase4-solver] cheap path — gpt-4o elapsed=${elapsed()}ms wolfram=${wolframAnswer ? 'yes' : 'no'}`);
         try {
           rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium');
-        } catch (fallbackErr) {
-          console.error('[phase4-solver] gpt-4o fallback also failed:', fallbackErr.message || fallbackErr);
-          rawSolution = '';
+        } catch (e) {
+          console.error(`[phase4-solver] gpt-4o failed elapsed=${elapsed()}ms:`, e.message || e);
         }
-      }
-
-      // ── Phase 6: olympiad self-consistency (olympiad ONLY) ──────────────
-      // Runs BEFORE verifier. Retry on disagreement uses MEDIUM effort —
-      // high effort is reserved exclusively for verifier-failure retries.
-      if (difficulty === 'olympiad' && rawSolution) {
-        const altSolution = await alternativeStrategySolver(problemText, wolframAnswer);
-        const sameAnswer = await compareAnswers(rawSolution, altSolution);
-        if (!sameAnswer && altSolution) {
-          console.warn('[phase6-consistency] solutions disagree — re-solving with both as context (medium effort)');
-          const retryNote = `You produced two solutions that disagree on the final answer:\n\n--- Solution A (primary) ---\n${rawSolution}\n\n--- Solution B (alternative method) ---\n${altSolution}\n\nResolve the disagreement and produce the single correct solution.`;
-          try {
-            rawSolution = await runSolver(problemText, wolframAnswer, 'o4-mini', 'medium', retryNote);
-          } catch (e) {
-            console.warn('[phase6-consistency] medium retry failed, keeping primary solution:', e.message || e);
-          }
-        }
-      }
-
-      // ── Phase 5: verifier (HARD and OLYMPIAD only — never easy/medium) ──
-      // The only place high reasoning effort is used.
-      if ((difficulty === 'hard' || difficulty === 'olympiad') && rawSolution) {
-        const verification = await verifySolution(problemText, rawSolution);
-        if (!verification.ok) {
-          console.warn('[phase5-verifier] verification failed — retrying solver with HIGH effort');
-          const retryNote = `Your previous solution failed verification because:\n${verification.reason}\n\nSolve the problem again carefully, fixing these specific errors.`;
-          try {
-            rawSolution = await runSolver(problemText, wolframAnswer, 'o4-mini', 'high', retryNote);
-          } catch (retryErr) {
-            console.warn('[phase5-verifier] high-effort retry failed, falling back to gpt-4o:', retryErr.message || retryErr);
-            try {
-              rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium', retryNote);
-            } catch (gptErr) {
-              console.error('[phase5-verifier] all retries failed, keeping unverified solution:', gptErr.message || gptErr);
-            }
-          }
-        }
-      }
-
-      // ── Phase 7+8: tutor formatting and stream final answer ─────────────
-      if (rawSolution) {
-        await streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res);
       } else {
-        // No solution at all — emit a minimal apology so the user gets a
-        // terminal message instead of an open SSE stream.
-        console.error('[router] no rawSolution available — emitting apology');
+        // hard / olympiad: NOW launch warm-start, race it against the
+        // remaining time-to-budget. Wolfram is fetched in parallel.
+        const remainingForWarm = Math.max(1000, thinkingBudget - elapsed());
+        console.log(`[phase4-warmstart] launching o4-mini medium remainingBudget=${remainingForWarm}ms elapsed=${elapsed()}ms`);
+        const warmPromise = withTimeout(warmStartSolver(problemText), remainingForWarm);
+
+        const [warmResult, wResult] = await Promise.all([warmPromise, wolframPromise]);
+        wolframAnswer = wResult;
+
+        if (warmResult) {
+          console.log(`[phase4-warmstart] succeeded — using warm solution elapsed=${elapsed()}ms`);
+          rawSolution = warmResult;
+        } else {
+          console.warn(`[timeout] warm-start missed deadline — using fast solver elapsed=${elapsed()}ms`);
+          try {
+            rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium');
+          } catch (e) {
+            console.error(`[phase4-fastfallback] gpt-4o failed elapsed=${elapsed()}ms:`, e.message || e);
+          }
+        }
+      }
+
+      // ── Phase 5+6: verifier and self-consistency in BACKGROUND ────────
+      // Fire-and-forget for hard/olympiad. They cannot block the user-facing
+      // stream. If they detect issues, they only log — there's no retry path
+      // because the response is already mid-stream by the time they finish.
+      if ((difficulty === 'hard' || difficulty === 'olympiad') && rawSolution) {
+        const solutionSnapshot = rawSolution;
+        verifySolution(problemText, solutionSnapshot)
+          .then(verification => {
+            if (verification.ok) {
+              console.log(`[phase5-verifier-bg] ok elapsed=${elapsed()}ms`);
+            } else {
+              console.warn(`[phase5-verifier-bg] FAILED (response already streamed) elapsed=${elapsed()}ms reason=${JSON.stringify((verification.reason || '').slice(0, 200))}`);
+            }
+          })
+          .catch(err => console.warn('[phase5-verifier-bg] error:', err.message || err));
+      }
+      if (difficulty === 'olympiad' && rawSolution) {
+        const solutionSnapshot = rawSolution;
+        const wolframSnapshot = wolframAnswer;
+        alternativeStrategySolver(problemText, wolframSnapshot)
+          .then(async (altSolution) => {
+            if (!altSolution) return;
+            const same = await compareAnswers(solutionSnapshot, altSolution);
+            if (same) {
+              console.log(`[phase6-consistency-bg] alternative confirms primary elapsed=${elapsed()}ms`);
+            } else {
+              console.warn(`[phase6-consistency-bg] DISAGREE (response already streamed) elapsed=${elapsed()}ms`);
+            }
+          })
+          .catch(err => console.warn('[phase6-consistency-bg] error:', err.message || err));
+      }
+
+      // ── Phase 7+8: tutor formatting and stream final answer ───────────
+      if (rawSolution) {
+        console.log(`[phase4-tutor] starting stream elapsed=${elapsed()}ms`);
+        await streamTutor(problemText, rawSolution, wolframAnswer, systemPrompt, res);
+        console.log(`[phase4-tutor] stream complete elapsed=${elapsed()}ms`);
+      } else {
+        console.error(`[router] no rawSolution available — emitting apology elapsed=${elapsed()}ms`);
         res.write(`data: ${JSON.stringify({ chunk: '죄송합니다. 일시적인 오류로 풀이를 생성하지 못했습니다. 다시 시도해주세요.' })}\n\n`);
       }
     }
 
+    console.log(`[router] response complete elapsed=${elapsed()}ms`);
     res.write('data: [DONE]\n\n');
     res.end();
 
