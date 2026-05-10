@@ -789,67 +789,85 @@ router.post('/message', async (req, res) => {
       console.log('[router] non-math input — direct streaming, skipping classify/Wolfram/solver');
       await streamOpenAI(systemPrompt, solveMessages, res, 'gpt-4o');
     } else {
-      // ── Phase 2: parallel intelligence layer ───────────────────────────
-      // classify + Wolfram + decompose + warmStartSolver run concurrently.
-      // Each helper internally swallows its own errors (returns null/[]/null
-      // on failure) so Promise.all never rejects.
+      // ── Phase 2 / Stage 1: cheap parallel layer ────────────────────────
+      // classify + Wolfram + decompose run concurrently. The expensive
+      // o4-mini warm-start has been removed — solver model is now picked
+      // AFTER classification so easy/medium problems never pay for o4-mini.
+      // Each helper internally try/catches and returns null/[]/null on
+      // failure so Promise.all never rejects.
       const phase2t0 = Date.now();
-      console.log('[phase2-parallel] start — classify + wolfram + decompose + warmStart');
-      const [classification, wolframAnswer, decomposition, warmSolution] = await Promise.all([
+      console.log('[phase2-parallel] start — classify + wolfram + decompose');
+      const [classification, wolframAnswer, decomposition] = await Promise.all([
         classifyProblem(problemText),
         wolframLookup(problemText),
-        decomposeProblem(problemText),
-        warmStartSolver(problemText)
+        decomposeProblem(problemText)
       ]);
       const { topic, difficulty, needs_casework, is_multi_part } = classification;
-      console.log(`[phase2-parallel] done in ${Date.now() - phase2t0}ms — topic=${topic} difficulty=${difficulty} casework=${needs_casework} multi_part=${is_multi_part} wolfram=${wolframAnswer ? 'yes' : 'no'} decomp=${decomposition.length} warm=${warmSolution ? 'yes' : 'no'}`);
+      console.log(`[phase2-parallel] done in ${Date.now() - phase2t0}ms — topic=${topic} difficulty=${difficulty} casework=${needs_casework} multi_part=${is_multi_part} wolfram=${wolframAnswer ? 'yes' : 'no'} decomp=${decomposition.length}`);
+
+      // ── Stage 2: select solver path based on classification ────────────
+      // easy/medium → cheap (gpt-4o, no reasoning effort)
+      // hard       → moderate (o4-mini medium reasoning)
+      // olympiad   → full-stack (o4-mini medium + verifier + alt-strategy)
+      let selectedPath;
+      let solverModel;
+      let solverEffort;
+      if (difficulty === 'easy' || difficulty === 'medium') {
+        selectedPath = 'cheap';
+        solverModel = 'gpt-4o';
+        solverEffort = 'medium'; // ignored by gpt-4o (non-reasoning)
+      } else if (difficulty === 'hard') {
+        selectedPath = 'moderate';
+        solverModel = 'o4-mini';
+        solverEffort = 'medium';
+      } else {
+        // olympiad
+        selectedPath = 'full-stack';
+        solverModel = 'o4-mini';
+        solverEffort = 'medium';
+      }
+      console.log(`[router] difficulty=${difficulty} topic=${topic} path=${selectedPath} wolfram=${wolframAnswer ? 'yes' : 'no'}`);
 
       // ── Phase 3: safe early streaming ───────────────────────────────────
       await streamStructuralAnalysis(res, classification, decomposition);
 
-      // ── Phase 4: primary solver ─────────────────────────────────────────
-      // Use the warm-start solution from Phase 2 if it completed; otherwise
-      // run runSolver now (medium effort, with Wolfram grounding).
-      let rawSolution = warmSolution;
-      if (!rawSolution) {
-        console.log('[phase4-solver] warm start unavailable — running solver now');
+      // ── Phase 4: primary solver (never high effort on first attempt) ────
+      let rawSolution = '';
+      try {
+        rawSolution = await runSolver(problemText, wolframAnswer, solverModel, solverEffort);
+      } catch (solverErr) {
+        console.warn(`[phase4-solver] ${solverModel} failed, falling back to gpt-4o:`, solverErr.message || solverErr);
         try {
-          rawSolution = await runSolver(problemText, wolframAnswer, 'o4-mini', 'medium');
-        } catch (solverErr) {
-          console.warn('[phase4-solver] o4-mini failed, falling back to gpt-4o:', solverErr.message || solverErr);
-          try {
-            rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium');
-          } catch (fallbackErr) {
-            console.error('[phase4-solver] gpt-4o fallback also failed:', fallbackErr.message || fallbackErr);
-            rawSolution = '';
-          }
+          rawSolution = await runSolver(problemText, wolframAnswer, 'gpt-4o', 'medium');
+        } catch (fallbackErr) {
+          console.error('[phase4-solver] gpt-4o fallback also failed:', fallbackErr.message || fallbackErr);
+          rawSolution = '';
         }
-      } else {
-        console.log('[phase4-solver] using warm-start solution from Phase 2');
       }
 
-      // ── Phase 6: olympiad self-consistency (runs BEFORE verifier so a
-      // disagreement can drive a high-effort retry that the verifier then
-      // checks) ──────────────────────────────────────────────────────────
+      // ── Phase 6: olympiad self-consistency (olympiad ONLY) ──────────────
+      // Runs BEFORE verifier. Retry on disagreement uses MEDIUM effort —
+      // high effort is reserved exclusively for verifier-failure retries.
       if (difficulty === 'olympiad' && rawSolution) {
         const altSolution = await alternativeStrategySolver(problemText, wolframAnswer);
         const sameAnswer = await compareAnswers(rawSolution, altSolution);
         if (!sameAnswer && altSolution) {
-          console.warn('[phase6-consistency] solutions disagree — escalating to high effort with both as context');
+          console.warn('[phase6-consistency] solutions disagree — re-solving with both as context (medium effort)');
           const retryNote = `You produced two solutions that disagree on the final answer:\n\n--- Solution A (primary) ---\n${rawSolution}\n\n--- Solution B (alternative method) ---\n${altSolution}\n\nResolve the disagreement and produce the single correct solution.`;
           try {
-            rawSolution = await runSolver(problemText, wolframAnswer, 'o4-mini', 'high', retryNote);
+            rawSolution = await runSolver(problemText, wolframAnswer, 'o4-mini', 'medium', retryNote);
           } catch (e) {
-            console.warn('[phase6-consistency] high-effort retry failed, keeping primary solution:', e.message || e);
+            console.warn('[phase6-consistency] medium retry failed, keeping primary solution:', e.message || e);
           }
         }
       }
 
-      // ── Phase 5: verifier (medium / hard / olympiad only) ───────────────
-      if (difficulty !== 'easy' && rawSolution) {
+      // ── Phase 5: verifier (HARD and OLYMPIAD only — never easy/medium) ──
+      // The only place high reasoning effort is used.
+      if ((difficulty === 'hard' || difficulty === 'olympiad') && rawSolution) {
         const verification = await verifySolution(problemText, rawSolution);
         if (!verification.ok) {
-          console.warn('[phase5-verifier] verification failed — retrying solver with high effort');
+          console.warn('[phase5-verifier] verification failed — retrying solver with HIGH effort');
           const retryNote = `Your previous solution failed verification because:\n${verification.reason}\n\nSolve the problem again carefully, fixing these specific errors.`;
           try {
             rawSolution = await runSolver(problemText, wolframAnswer, 'o4-mini', 'high', retryNote);
